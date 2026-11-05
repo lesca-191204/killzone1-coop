@@ -127,7 +127,7 @@ TEXTS = {
                        '• Si un jugador muere, reaparece a los 5 segundos junto al otro. Si mueren los dos, se pierde la misión.\n'
                        '• Si alguien se desconecta, el otro sigue jugando solo.\n'
                        '• Si algo falla, guardá la carpeta logs de las dos PCs antes de volver a abrir el juego y '
-                       'mandala (GitHub o Discord).',
+                       'adjuntala en un issue de GitHub (los reportes van SOLO ahí y SIEMPRE con logs).',
     'need_iso': 'Elegí primero la ISO del juego (Inicio).',
     'need_ip': 'Escribí la IP del anfitrión.',
     'game_missing': 'Falta el juego (game\\killzone.exe). Volvé a descomprimir el paquete completo.',

@@ -102,9 +102,11 @@ and every PC simulates the whole match with them (lockstep). That is why it stay
 
 ## 🧾 Reporting problems
 
+> ❗ **Bugs are reported ONLY in [GitHub Issues](../../issues), and ALWAYS with logs.** Reports on Discord or
+> without logs are not taken.
+
 If something fails, **save the `logs` folder of BOTH PCs before opening the game again** (only the last 3
-sessions are kept) and send it in a **[GitHub issue](../../issues)** or on the
-**[Discord](https://discord.gg/UYFcV5rbDw)**. Say what you were doing, which level and which FPS.
+sessions are kept), zip it and attach it to the issue. Say what you were doing, which level and which FPS.
 
 ## ⚙️ How it works (short)
 
@@ -234,9 +236,11 @@ servidor.
 
 ## 🧾 Reportar problemas
 
+> ❗ **Los problemas se reportan SOLO en [GitHub Issues](../../issues), y SIEMPRE con logs.** Lo que llegue por
+> Discord o sin logs no se toma.
+
 Si algo falla, **guardá la carpeta `logs` de LAS DOS PCs antes de volver a abrir el juego** (solo se guardan
-las últimas 3 partidas) y mandala en un **[issue de GitHub](../../issues)** o en el
-**[Discord](https://discord.gg/UYFcV5rbDw)**. Contá qué estaban haciendo, en qué nivel y con cuántos FPS.
+las últimas 3 partidas), comprimila y adjuntala al issue. Contá qué estaban haciendo, en qué nivel y con cuántos FPS.
 
 ## 🙏 Créditos
 

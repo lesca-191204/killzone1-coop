@@ -1,0 +1,42 @@
+name: Bug report / Reporte de problema
+description: Co-op problem, ALWAYS with the logs of both PCs. / Problema del co-op, SIEMPRE con los logs de las dos PCs.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Issues without logs are closed.** Only the Spanish/European disc `SCES-52004` is supported, and the only goal is the complete campaign in co-op.
+        **Los issues sin logs se cierran.** Solo se soporta el disco `SCES-52004` y el único objetivo es la campaña completa en co-op.
+  - type: input
+    id: version
+    attributes:
+      label: Launcher version (both PCs) / Versión del launcher (las dos PCs)
+      placeholder: v0.3.2
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Level, FPS and what you were doing / Nivel, FPS y qué estaban haciendo
+      placeholder: "Level 1, 60 FPS, pressed Continue after winning"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened / Qué pasó
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs of BOTH PCs (zip of the logs folder) / Logs de LAS DOS PCs (zip de la carpeta logs)
+      description: Save the logs folder before opening the game again and drag the zip here. / Guardá la carpeta logs antes de volver a abrir el juego y arrastrá el zip acá.
+    validations:
+      required: true
+  - type: textarea
+    id: pc
+    attributes:
+      label: PC (CPU, GPU, RAM, Windows) of both players / PC de los dos jugadores
+    validations:
+      required: true

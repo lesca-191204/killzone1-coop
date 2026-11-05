@@ -50,5 +50,7 @@ A TENER EN CUENTA
 - Si un jugador muere, reaparece a los 5 segundos junto al otro.
 
 SI ALGO FALLA
+Los problemas se reportan SOLO en GitHub Issues y SIEMPRE con logs (lo que llegue por Discord o sin logs no se
+toma): https://github.com/lesca-191204/killzone1-coop/issues
 Guardar la carpeta "logs" de las DOS PCs antes de volver a abrir el juego (se guardan solo las ultimas 3
-partidas) y mandarla en un issue de GitHub o en el Discord. Cada reporte ayuda a terminarlo mas rapido.
+partidas), comprimirla y adjuntarla al issue. Cada reporte ayuda a terminarlo mas rapido.
