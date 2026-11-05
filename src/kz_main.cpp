@@ -13,6 +13,7 @@ extern "C" int __llvm_profile_write_file(void);
 #endif
 #include "kz_config.h"
 #include "kz_input.h"
+#include "kz_netplay.h"
 #include "kz_iso.h"
 #include "kz_region.h"
 #include "kz_launcher.h"
@@ -302,7 +303,7 @@ int main(int argc, char *argv[])
         PS2Runtime::setIoPaths(paths);
 
         kzInputInit(kzConfigPath());
-        ps2SetPadProvider(&kzPadProvider);
+        ps2SetPadProvider(&kzNetPadProvider); // fork: lockstep input (kz_netplay.cpp)
 
         // The runtime's raylib window/present loop is replaced by our SDL window + kzgs, so the runtime always runs
         // window-less. Automation (PS2X_HEADLESS=1 already set by the caller) also skips our window: kzgs renders
@@ -403,9 +404,33 @@ int main(int argc, char *argv[])
         }
         kzAimInstall(runtime);
         kzTimeFixInstall(runtime);
+        if (const char *nm = std::getenv("KZ_NET"); nm && (_stricmp(nm, "host") == 0 || _stricmp(nm, "join") == 0))
+        {
+            // online: the optional post-process passes skip or run guest drawing code; the same (port defaults) on both PCs
+            cfg.glow = false;
+            cfg.motionBlur = false;
+            cfg.lensBlur = false;
+            cfg.noiseFilter = false;
+        }
         kzPostInstall(runtime);
         // Ultrawide hooks only when an ultrawide aspect or a field of view other than the game's is chosen (or forced for tests):
         // otherwise the game's own path is kept. The field of view uses the same render hooks (kz_widescreen.cpp).
+        // Fork (KZ1 co-op online): settings that change the emulated game itself must be the same on both PCs, so a session
+        // forces them: the game's own field of view and 16:9 view (they change the cameras: culling, LOD, the drawing code's
+        // random numbers) and 60 Hz guest vblanks (below). Picture settings (resolution, upscale, AA, filters, sharpen,
+        // texture packs, vsync) only change the PC's drawing and stay free.
+        const char *netMode = std::getenv("KZ_NET");
+        const bool netSession = netMode && (_stricmp(netMode, "host") == 0 || _stricmp(netMode, "join") == 0);
+        if (netSession)
+        {
+            // KZ_NET_FOV (same on both PCs, default 90). Every co-op session so far ran with the FOV hooks on (world 120);
+            // the game's own FOV (hooks off) crashed at the first frame with two players configured (not looked into).
+            const char *nf = std::getenv("KZ_NET_FOV");
+            cfg.fov = nf && *nf ? std::clamp(static_cast<float>(std::atof(nf)), 60.0f, 130.0f) : 90.0f;
+            cfg.weaponFov = 0.0f;
+            cfg.aspect = KzAspect::Widescreen16x9;
+            std::cout << "[kz] online session: field of view " << cfg.fov << ", game weapon FOV, 16:9 view (must match on both PCs)" << std::endl;
+        }
         kzWideSetFov(cfg.fov, cfg.weaponFov);
         const bool wide = cfg.aspect == KzAspect::UltrawideAuto || cfg.aspect == KzAspect::Ultrawide21x9 ||
                           cfg.aspect == KzAspect::Ultrawide32x9 || std::getenv("KZ_WIDE_ASPECT");
@@ -419,6 +444,10 @@ int main(int argc, char *argv[])
                       << "ultrawide " << (wide ? "on" : "off (aspect setting)") << "; button prompts "
                       << (cfg.buttonPrompts ? "on while the game's button atlas matches the known one" : "off (setting)")
                       << "; game video forced to NTSC 60 Hz (config/killzone_pal.toml). Boot files and memory card: disc_pal" << std::endl;
+        if (kzIsEs())
+            std::cout << "[kz] SCES-52004 disc (Multi-6, En/Nl/Fr/De/It/Es; fork): every hook uses its SCES_520.04 address "
+                      << "(src/kz_addrs.cpp); game video forced to NTSC 60 Hz (config/killzone_es.toml). Boot files and memory card: disc_es"
+                      << std::endl;
         // Tests: a separate (e.g. empty) memory card folder. After loadELF, which resets the roots to the ELF folder.
         if (const char *mc = std::getenv("KZ_MC_ROOT"); mc && *mc)
         {
@@ -435,7 +464,15 @@ int main(int argc, char *argv[])
             if (const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window)))
                 displayHz = static_cast<int>(std::lround(mode->refresh_rate));
         }
-        const int fps = std::getenv("KZ_FPS") ? std::atoi(std::getenv("KZ_FPS")) : cfg.fpsLimit;
+        int fps = std::getenv("KZ_FPS") ? std::atoi(std::getenv("KZ_FPS")) : cfg.fpsLimit;
+        if (netSession)
+        {
+            // the guest vblank rate follows the frame-rate setting and else the monitor (144/165 Hz...): fixed 60 online
+            // ("unlimited" at a 60 Hz display = the configuration every session test ran with)
+            // the session's rate (host's choice, kz_netplay; installed with the game overrides, before this point)
+            fps = 0;
+            displayHz = kzNetSessionVblankRate();
+        }
         kzTimingInit(fps, displayHz);
 
         std::atomic<bool> runtimeDone{false};

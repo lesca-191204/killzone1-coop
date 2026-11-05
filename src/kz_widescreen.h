@@ -15,6 +15,7 @@ void kzWideInstall(PS2Runtime &runtime);
 
 // Target aspect ratio (width / height) of the 3D view; <= 16/9 turns the feature off. Thread-safe.
 void kzWideSetTargetAspect(float aspect);
+float kzWideNativeFov(float current); // unwidened FOV of the camera in the current world call, or 0
 float kzWideTargetAspect(); // 0 = off
 
 // Derives the target from the aspect setting and the window size (UltrawideAuto: the window's own ratio; 21:9 and 32:9: fixed).

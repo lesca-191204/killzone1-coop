@@ -1,6 +1,8 @@
 #include "kz_post.h"
+#include "kz_widescreen.h"
 
 #include "kz_addrs.h"
+#include "kz_region.h"
 #include "kz_config.h"
 
 #include "ps2_runtime.h"
@@ -8,7 +10,10 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <vector>
 
 // Game functions (SCUS-97402; PAL addresses in kz_addrs.cpp), found from a GS trace of first-mission gameplay and the PostProcessPreset reflection data
 // (docs/findings.md "Post-process passes"). All three are called with the render context and draw directly into the
@@ -52,6 +57,8 @@ namespace
     PS2Runtime::RecompiledFunction g_origLodScale = nullptr;
     float g_renderDistance = 1.0f;
     float g_lodScale = 1.0f;
+    bool g_lodFovComp = true;
+    uint32_t g_lodRefAddr = 0;
     std::atomic<int> g_zoneCalls{0}, g_lodCalls{0};
 
     std::atomic<int> g_glowCalls{0}, g_blendCalls{0}, g_lensCalls{0};
@@ -149,10 +156,34 @@ namespace
         if (entry)
         {
             saved = rdF(rdram, obj);
-            wrF(rdram, obj, saved * g_lodScale);
+            // FOV compensation: the scale is base * tan(ref/2) / tan(fov/2), so a wider field of view (FOV option,
+            // co-op sessions) picked lower LODs at the same distance (FOV 120: x0.32, models low-poly unless close).
+            // With it the LOD choice is the one the game makes at its own field of view (KZ_LOD_FOVCOMP=0: off).
+            float k = g_lodScale;
+            const float fov = ctx->f[12];
+            // relative to the camera's own (unwidened) FOV: the LOD the game picks without the FOV option
+            const float native = kzWideNativeFov(fov);
+            if (g_lodFovComp && native > 1.0f && fov < 170.0f)
+                k *= std::tan(fov * 0.5f * 0.017453294f) / std::tan(native * 0.5f * 0.017453294f);
+            // Base LOD factor (game object +0x1C): 1.0 with one player, 0.4 with two (the PS2 split-screen budget:
+            // co-op humanoids low-poly unless close, KZ_LOD_TRACE). Each PC renders one full-screen view, so the
+            // single-player detail is used (KZ_LOD_KEEPBASE=1: keep the game's value).
+            static const bool keepBase = std::getenv("KZ_LOD_KEEPBASE") != nullptr;
+            const float base = (!keepBase && saved > 0.0f && saved < 1.0f) ? 1.0f : saved;
+            wrF(rdram, obj, base * k);
+            static int compLog = 0;
+            if (g_log && k != g_lodScale && compLog < 5)
+            {
+                ++compLog;
+                std::printf("[kz-post] lod fov compensation: fov %.1f -> LOD x%.2f\n", fov, k);
+            }
             const int n = ++g_lodCalls;
+            static const int trace = std::getenv("KZ_LOD_TRACE") ? std::atoi(std::getenv("KZ_LOD_TRACE")) : 0;
+            if (trace && n >= trace && n < trace + 400)
+                std::printf("[kz-post] lodtrace %d ra %08x fov %.2f native %.2f base %.3f k %.3f\n", n,
+                            getRegU32(ctx, 31), fov, native, saved, k);
             if (g_log && (n == 1 || n % 600 == 0))
-                std::printf("[kz-post] lod scale call %d: base %.3f x%.2f\n", n, saved, g_lodScale);
+                std::printf("[kz-post] lod scale call %d: base %.3f x%.2f (fov %.1f)\n", n, saved, k, fov);
         }
         g_origLodScale(rdram, ctx, rt);
         if (entry)
@@ -172,6 +203,87 @@ namespace
         g_origPostRender(rdram, ctx, rt);
     }
 
+    // KZ_LOD_VT=1 (RE, ES): character draw FUN_001f8d80 -- logs each new target of the per-part virtual call +0x88
+    // (the model's part objects at [[a0+0x104]+0x1C +8] and its +0x14 list) and the part's vtable.
+    PS2Runtime::RecompiledFunction g_origCharDraw = nullptr;
+    void charDraw(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt)
+    {
+        const uint32_t o = getRegU32(ctx, 4);
+        auto rd = [rdram](uint32_t a) { uint32_t v; std::memcpy(&v, rdram + (a & kRamMask), 4); return v; };
+        static std::vector<uint32_t> seen;
+        const uint32_t m0 = rd(o + 0x104);
+        if (m0 >= 0x100000u && m0 < 0x2000000u)
+        {
+            const uint32_t m = m0 + 0x1C;
+            auto note = [&](uint32_t part, int idx) {
+                if (part < 0x100000u || part >= 0x2000000u)
+                    return;
+                const uint32_t vt = rd(part), fn = rd(vt + 0x88);
+                if (std::find(seen.begin(), seen.end(), fn ^ vt) == seen.end() && seen.size() < 64)
+                {
+                    seen.push_back(fn ^ vt);
+                    std::printf("[kz-lodvt] obj %x part[%d] %x vt %x +0x88 -> %x\n", o, idx, part, vt, fn);
+                }
+            };
+            note(rd(m + 8), -1);
+            const int n = static_cast<int>(rd(m + 0xC));
+            for (int i = 0; i < n && i < 32; ++i)
+                note(rd(rd(m + 0x14) + i * 4), i);
+        }
+        g_origCharDraw(rdram, ctx, rt);
+    }
+
+    // KZ_LOD_STATS=1 (RE, ES): FUN_003ffe68(node, wanted) returns the LOD child actually drawn (the nearest streamed-in
+    // one). Every 5 s: calls, how many got a lower-detail child than wanted (not streamed in) and the wanted histogram.
+    // LOD option (11-05): FUN_003f59c0(f12 factor, a0 node table, ...) picks the detail level of every LOD node (characters
+    // and level geometry, also the streaming prefetch FUN_003f0250): level i+1 once distance / factor passes threshold i.
+    // The factor is the global [0x559D98]+0x1AC, which the character code rewrites before each draw (FUN_001f29a8,
+    // FUN_001ee4d0, ...), so scaling it at its setter FUN_001c23e8 did nothing for humanoids. Scaling it here does: x2 =
+    // every level switch at twice the distance. A level not streamed in yet falls back to the next lower one (FUN_003ffe68).
+    // EXPERIMENTAL, off (KZ_LOD_DETAIL=<x>, solo only): more detailed levels than the PS2 memory budget allows. At x3 in
+    // co-op the stream manager evicted a model still in use (crash JALR 0x178300 -> garbage ~50 frames into level 1);
+    // x8 alone ran 700 frames. Many higher levels are not streamed in anyway (KZ_LOD_STATS: "lower than wanted").
+    float g_lodDetail = 1.0f;
+    PS2Runtime::RecompiledFunction g_origLodSelect = nullptr;
+    void lodSelect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt)
+    {
+        if (ctx->pc == 0x003F59C0u && g_lodDetail != 1.0f)
+            ctx->f[12] *= g_lodDetail;
+        g_origLodSelect(rdram, ctx, rt);
+    }
+
+    PS2Runtime::RecompiledFunction g_origLodPick = nullptr;
+    void lodPick(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt)
+    {
+        const int32_t wanted = static_cast<int32_t>(getRegU32(ctx, 5));
+        const uint32_t ra = getRegU32(ctx, 31);
+        g_origLodPick(rdram, ctx, rt);
+        if (ctx->pc != ra)
+            return;
+        const int32_t used = static_cast<int32_t>(getRegU32(ctx, 2));
+        static uint64_t calls = 0, lower = 0, none = 0, hist[4] = {}, histUsed[4] = {};
+        static auto t0 = std::chrono::steady_clock::now();
+        ++calls;
+        if (used < 0)
+            ++none;
+        else if (used > wanted)
+            ++lower;
+        hist[std::clamp(wanted, 0, 3)]++;
+        if (used >= 0)
+            histUsed[std::clamp(used, 0, 3)]++;
+        if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(5))
+        {
+            std::printf("[kz-lodstats] %llu picks: %llu lower than wanted (not streamed), %llu none; wanted 0..3: %llu %llu %llu %llu; used: %llu %llu %llu %llu\n",
+                        (unsigned long long)calls, (unsigned long long)lower, (unsigned long long)none,
+                        (unsigned long long)hist[0], (unsigned long long)hist[1], (unsigned long long)hist[2], (unsigned long long)hist[3],
+                        (unsigned long long)histUsed[0], (unsigned long long)histUsed[1], (unsigned long long)histUsed[2], (unsigned long long)histUsed[3]);
+            calls = lower = none = 0;
+            for (auto &h : hist) h = 0;
+            for (auto &h : histUsed) h = 0;
+            t0 = std::chrono::steady_clock::now();
+        }
+    }
+
     bool hook(PS2Runtime &rt, uint32_t addr, PS2Runtime::RecompiledFunction fn, PS2Runtime::RecompiledFunction &orig)
     {
         orig = rt.hasFunction(addr) ? rt.lookupFunction(addr) : nullptr;
@@ -185,6 +297,9 @@ namespace
         return value;
     }
 }
+
+void kzPostSetLodScale(float scale) { g_lodScale = std::clamp(scale, 0.25f, 16.0f); }
+float kzPostLodScale() { return g_lodScale; }
 
 void kzPostInstall(PS2Runtime &runtime)
 {
@@ -203,7 +318,27 @@ void kzPostInstall(PS2Runtime &runtime)
         g_renderDistance = static_cast<float>(std::atof(v));
     if (const char *v = std::getenv("KZ_LOD_SCALE"); v && *v)
         g_lodScale = static_cast<float>(std::atof(v));
-    if (g_renderDistance != 1.0f || g_lodScale != 1.0f)
+    // Reference field of view of the LOD scale (a global read by the function itself: lui at,hi / lwc1 f0,lo(at) at
+    // +4 / +8; ES 0x55A1C0), decoded from the guest code so every disc works.
+    g_lodFovComp = envFlag("KZ_LOD_FOVCOMP", true);
+    if (std::getenv("KZ_LOD_STATS") && kzIsEs() && !hook(runtime, 0x003FFE68u, &lodPick, g_origLodPick))
+        std::printf("[kz] lod stats hook FAILED\n");
+    if (std::getenv("KZ_LOD_VT") && kzIsEs() && !hook(runtime, 0x001F8D80u, &charDraw, g_origCharDraw))
+        std::printf("[kz] lod vt trace hook FAILED\n");
+    {
+        const uint8_t *ram = runtime.memory().getRDRAM();
+        auto rd32 = [ram](uint32_t addr) { uint32_t v; std::memcpy(&v, ram + (addr & kRamMask), 4); return v; };
+        const uint32_t i1 = rd32(a.lodScale + 4), i2 = rd32(a.lodScale + 8);
+        if ((i1 & 0xFFFF0000u) == 0x3C010000u && (i2 & 0xFFE00000u) == 0xC4200000u)
+            g_lodRefAddr = ((i1 & 0xFFFFu) << 16) + static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(i2 & 0xFFFFu)));
+        if (!g_lodRefAddr)
+            g_lodFovComp = false;
+    }
+    if (const char *v = std::getenv("KZ_LOD_DETAIL"); v && *v)
+        g_lodDetail = std::clamp(static_cast<float>(std::atof(v)), 0.25f, 16.0f);
+    if (g_lodDetail != 1.0f && kzIsEs() && !hook(runtime, 0x003F59C0u, &lodSelect, g_origLodSelect))
+        std::printf("[kz] LOD selector hook FAILED\n");
+    if (g_renderDistance != 1.0f || g_lodScale != 1.0f || g_lodFovComp)
     {
         const bool viewOk = hook(runtime, a.zoneParams, &zoneParams, g_origZoneParams) &&
                             hook(runtime, a.lodScale, &lodScale, g_origLodScale);

@@ -172,6 +172,10 @@ void kzgsSetSmaaThreshold(float threshold);
 
 // Frame-rate counter in the top-left corner of the window: presented frames per second, updated twice a second. Off by default.
 void kzgsSetShowFps(bool show);
+// fork (KZ1 co-op): a centred banner drawn over every presented frame ("" = none). Any thread.
+void kzgsSetBanner(const char *text);
+// fork (11-05): one line about the GS thread for the freeze diagnosis ([stall] line)
+void kzgsDebugState(char *buf, size_t n);
 
 // SMAA luma edge threshold (0.02..0.5, default 0.1 = SMAA's HIGH preset). Higher = only strong edges are smoothed and texture detail is kept;
 // the shaders are rebuilt on the next frame when it changes. Direct3D 11 only. See docs/findings.md ("Menu jitter and blur").

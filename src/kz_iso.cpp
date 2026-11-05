@@ -50,7 +50,7 @@ namespace
             const size_t end = boot.find_first_of("\r\n", at);
             boot = boot.substr(at, end == std::string::npos ? std::string::npos : end - at);
         }
-        for (KzRegion r : {KzRegion::Us, KzRegion::Pal})
+        for (KzRegion r : {KzRegion::Us, KzRegion::Pal, KzRegion::Es})
             if (boot.find(kzRegionBootElf(r)) != std::string::npos)
             {
                 region = r;
@@ -161,7 +161,7 @@ KzDiscCheck kzCheckDisc(const std::filesystem::path &isoPath)
     KzRegion region = KzRegion::Us;
     if (!regionFromSystemCnf(text, region))
     {
-        r.message = "This is a different game or release. Killzone USA (SCUS-97402) or Europe (SCES-52893) is required.";
+        r.message = "This is a different game or release. Killzone USA (SCUS-97402) or Europe (SCES-52893 / SCES-52004) is required.";
         return r;
     }
     std::vector<uint8_t> elf;
@@ -173,8 +173,8 @@ KzDiscCheck kzCheckDisc(const std::filesystem::path &isoPath)
     }
     if (xorCrc(elf) != kzRegionBootElfXorCrc(region))
     {
-        r.message = region == KzRegion::Pal ? "Killzone (Europe) found, but a different revision of SCES-52893; it is not supported."
-                                            : "Killzone (USA) found, but a different revision than v1.00; it is not supported.";
+        r.message = region == KzRegion::Us ? std::string("Killzone (USA) found, but a different revision than v1.00; it is not supported.")
+                                           : std::string(kzRegionTitle(region)) + " found, but a different revision of " + kzRegionSerial(region) + "; it is not supported.";
         return r;
     }
     if (!kzRegionSupported(region))
@@ -184,7 +184,8 @@ KzDiscCheck kzCheckDisc(const std::filesystem::path &isoPath)
     }
     r.ok = true;
     r.region = region;
-    r.message = region == KzRegion::Pal ? "Disc: Killzone (Europe) - SCES-52893 - OK" : "Disc: Killzone (USA) v1.00 - SCUS-97402 - OK";
+    r.message = region == KzRegion::Us ? std::string("Disc: Killzone (USA) v1.00 - SCUS-97402 - OK")
+                                       : std::string("Disc: ") + kzRegionTitle(region) + " - " + kzRegionSerial(region) + " - OK";
     return r;
 }
 
@@ -195,7 +196,7 @@ bool kzDetectElfRegion(const std::filesystem::path &elfPath, KzRegion &region, s
     std::vector<uint8_t> elf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     const uint32_t crc = xorCrc(elf);
     const std::string name = upper(elfPath.filename().string());
-    for (KzRegion r : {KzRegion::Us, KzRegion::Pal})
+    for (KzRegion r : {KzRegion::Us, KzRegion::Pal, KzRegion::Es})
         if (name == kzRegionBootElf(r))
         {
             region = r;
@@ -205,14 +206,14 @@ bool kzDetectElfRegion(const std::filesystem::path &elfPath, KzRegion &region, s
                 *note = std::string(kzRegionBootElf(r)) + " has an unexpected CRC (a different revision?)";
             return false;
         }
-    for (KzRegion r : {KzRegion::Us, KzRegion::Pal})
+    for (KzRegion r : {KzRegion::Us, KzRegion::Pal, KzRegion::Es})
         if (crc == kzRegionBootElfXorCrc(r))
         {
             region = r;
             return true;
         }
     if (note)
-        *note = elfPath.filename().string() + " is neither boot ELF (SCUS_974.02, SCES_528.93); treated as US";
+        *note = elfPath.filename().string() + " is not a known boot ELF (SCUS_974.02, SCES_528.93, SCES_520.04); treated as US";
     return false;
 }
 

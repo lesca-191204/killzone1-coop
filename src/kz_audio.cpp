@@ -144,6 +144,8 @@ namespace
         g_konCount[0] = g_konCount[1] = g_koffCount[0] = g_koffCount[1] = 0;
     }
 
+    constexpr double kIopHz = 36864000.0;
+    uint64_t g_lastIop = 0;
     void printStats(double now)
     {
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_statsLast).count();
@@ -161,6 +163,12 @@ namespace
                      static_cast<unsigned long long>(g_underrunFrames.load()),
                      static_cast<unsigned long long>(g_skippedFrames.load()), g_pace ? g_factor : 1.0,
                      static_cast<unsigned long long>(g_feedCalls.load()), static_cast<unsigned long long>(g_feedFrames.load()));
+        {
+            static uint64_t lastIop = 0;
+            std::fprintf(stderr, "[kz_audio] iop clock %.3fx real time\n",
+                         secs > 0 ? (g_lastIop - lastIop) / (kIopHz * secs) : 0.0);
+            lastIop = g_lastIop;
+        }
         if (g_voiceMon)
             voiceMonPrint(now);
         g_statsFrames = 0;
@@ -206,7 +214,57 @@ namespace
     {
         ++g_feedCalls;
         g_feedFrames += static_cast<uint64_t>(std::max(additional, 0)) / 4u;
-        const uint32_t avail = kzspu2AvailableFrames();
+        uint32_t avail = kzspu2AvailableFrames();
+        // Without SPU2 pacing (co-op sessions: KZ_AUDIO_PACE=0, the SPU2 must follow emulated time exactly) the
+        // producer runs a little above or below real time. Instead of skipping (clicks) or zero-filling (crackle), the
+        // output is resampled: read ~2.5% more or less than the device asks for, by how far the queue is from its
+        // target. Output side only: the emulated SPU2 never sees it.
+        if (!g_pace)
+        {
+            static int16_t src[4096 * 2];
+            static int16_t out[1024 * 2];
+            uint32_t need = static_cast<uint32_t>(std::max(additional, 0)) / 4u;
+            if (avail > kHighFrames * 2)
+            {
+                g_skippedFrames += kzspu2SkipFrames(avail - kTargetFrames);
+                avail = kzspu2AvailableFrames();
+            }
+            // 80 ms of queue in sessions (the producer is not paced to real time); +-5% rate from it.
+            constexpr double kSessionTarget = kTargetFrames * 2.0;
+            const double fill = (static_cast<double>(avail) - kSessionTarget) / kSessionTarget;
+            const double ratio = std::clamp(1.0 + 0.05 * fill, 0.95, 1.05);
+            while (need)
+            {
+                const uint32_t chunk = std::min<uint32_t>(need, 1024);
+                const uint32_t want = std::min<uint32_t>(4096, static_cast<uint32_t>(chunk * ratio + 0.5));
+                const uint32_t got = kzspu2ReadSamples(src, want);
+                if (got >= 2 && got * 4u >= chunk * 3u)
+                {
+                    const double step = static_cast<double>(got - 1) / std::max<uint32_t>(1, chunk - 1);
+                    for (uint32_t i = 0; i < chunk; ++i)
+                    {
+                        const double pos = i * step;
+                        const uint32_t a = std::min<uint32_t>(static_cast<uint32_t>(pos), got - 1);
+                        const uint32_t b = std::min<uint32_t>(a + 1, got - 1);
+                        const double f = pos - a;
+                        for (int c = 0; c < 2; ++c)
+                            out[i * 2 + c] = static_cast<int16_t>(src[a * 2 + c] * (1.0 - f) + src[b * 2 + c] * f);
+                    }
+                    if (got < want)
+                        g_underrunFrames += want - got;
+                }
+                else
+                {
+                    // Too little to stretch without changing the sound (Codex 11-04): play what there is, then silence.
+                    std::memcpy(out, src, got * 4);
+                    std::memset(out + got * 2, 0, (chunk - got) * 4);
+                    g_underrunFrames += chunk - got;
+                }
+                SDL_PutAudioStreamData(stream, out, static_cast<int>(chunk * 4));
+                need -= chunk;
+            }
+            return;
+        }
         if (avail > kHighFrames)
             g_skippedFrames += kzspu2SkipFrames(avail - kTargetFrames);
 
@@ -271,9 +329,7 @@ namespace
     // queue and force periodic skips. So the SPU2 gets its own clock: it advances by IOP time scaled by a factor <= 1
     // that tracks wall time (re-estimated in the advance hook). The SPU2 still always moves with IOP time, so IOP code
     // that waits for an SPU2 DMA or IRQ keeps working; it just sees the SPU2 run at real-time speed. KZ_AUDIO_PACE=0 off.
-    constexpr double kIopHz = 36864000.0;
     bool g_paceInit = false;
-    uint64_t g_lastIop = 0;
     double g_spu = 0;
     std::chrono::steady_clock::time_point g_paceT0, g_paceLastAdjust;
     double g_spuAtT0 = 0;

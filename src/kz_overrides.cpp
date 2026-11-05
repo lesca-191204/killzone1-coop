@@ -9,6 +9,8 @@
 #include "kz_sif_modules.h"
 #include "kz_ipu.h"
 #include "kz_devtools.h"
+#include "kz_lockstep.h"
+#include "kz_netplay.h"
 #include "kz_addrs.h"
 #include "kz_region.h"
 #include "ps2_runtime.h"
@@ -118,6 +120,8 @@ namespace
     {
         const KzAddrs &a = kzAddrs();
         kzDevHooksInstall(runtime);
+        kzLockstepInstall(runtime); // fork: KZ_LOCKSTEP / KZ_HASH_LOG (kz_lockstep.cpp)
+        kzNetInstall(runtime);      // fork: KZ_NET input lockstep (kz_netplay.cpp)
         if (const char *tl = std::getenv("KZ_TIMELINE"); tl && *tl)
         {
             tlInstall<0>(runtime, a.frameLimiter);  // frame limiter / delta
@@ -157,9 +161,12 @@ namespace
     }
     void applyKillzoneUs(PS2Runtime &runtime) { applyFor(runtime, KzRegion::Us); }
     void applyKillzonePal(PS2Runtime &runtime) { applyFor(runtime, KzRegion::Pal); }
+    void applyKillzoneEs(PS2Runtime &runtime) { applyFor(runtime, KzRegion::Es); }
 }
 
 // ELF CRC32 (zlib) of SCUS_974.02 v1.00 = 0x114E85F8 (PCSX2-style XOR CRC is CAAEC49C).
 PS2_REGISTER_GAME_OVERRIDE("Killzone SCUS-97402", "SCUS_974.02", 0x00146F30u, 0x114E85F8u, applyKillzoneUs)
 // SCES_528.93 (PAL, En/Ru/El): ELF CRC32 (zlib) 0x39B8D221 (XOR CRC 69FE9BB6).
 PS2_REGISTER_GAME_OVERRIDE("Killzone SCES-52893", "SCES_528.93", 0x00146F10u, 0x39B8D221u, applyKillzonePal)
+// SCES_520.04 (PAL Multi-6, En/Nl/Fr/De/It/Es): ELF CRC32 (zlib) 0xC8407F87 (XOR CRC 6624A78C).
+PS2_REGISTER_GAME_OVERRIDE("Killzone SCES-52004", "SCES_520.04", 0x00146F10u, 0xC8407F87u, applyKillzoneEs)

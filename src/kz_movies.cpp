@@ -20,11 +20,16 @@
 #include "kz_config.h"
 #include "kz_addrs.h"
 #include "ps2_runtime.h"
+#include "runtime/ee_scheduler.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+
+extern std::atomic<uint64_t> g_ps2LastMenuTick; // EeScheduler.cpp (fork)
+extern std::atomic<bool> g_ps2InMovie;
 
 namespace
 {
@@ -64,7 +69,8 @@ namespace
             const std::string name = movieName(rdram, getRegU32(ctx, 4));
             const bool skip = g_skipIntro && name == kIntroMovie;
             if (g_log || skip)
-                std::printf("[kz] movie \"%s\"%s\n", name.c_str(), skip ? ": skipped (Skip intro movies)" : "");
+                std::printf("[kz] movie \"%s\"%s (vblank %llu)\n", name.c_str(), skip ? ": skipped (Skip intro movies)" : "",
+                            static_cast<unsigned long long>(rt->eeScheduler().currentVSyncTick()));
             if (skip)
             {
                 ctx->pc = getRegU32(ctx, 31);
@@ -72,13 +78,34 @@ namespace
                 return;
             }
         }
+        const uint32_t ra = getRegU32(ctx, 31);
+        g_ps2InMovie.store(true, std::memory_order_relaxed);
         g_origPlayMovie(rdram, ctx, rt);
+        if (ctx->pc == ra)
+            g_ps2InMovie.store(false, std::memory_order_relaxed);
+        if (g_log && ctx->pc == getRegU32(ctx, 31))
+            std::printf("[kz] movie returned (vblank %llu)\n", static_cast<unsigned long long>(rt->eeScheduler().currentVSyncTick()));
+    }
+
+    // KZ_MOVIE_LOG: the file-exists check (ES FUN_001477a0) while a movie is being looked up: which .pss and whether
+    // it is on the disc (11-05: level cutscenes never played in co-op on the ES disc)
+    PS2Runtime::RecompiledFunction g_origExists = nullptr;
+    void fileExists(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt)
+    {
+        const uint32_t ra = getRegU32(ctx, 31);
+        const bool inMovie = g_ps2InMovie.load(std::memory_order_relaxed);
+        const std::string name = inMovie ? movieName(rdram, getRegU32(ctx, 4)) : std::string();
+        g_origExists(rdram, ctx, rt);
+        if (inMovie && ctx->pc == ra)
+            std::printf("[kz] movie file \"%s\": %s\n", name.c_str(), getRegU32(ctx, 2) ? "found" : "NOT FOUND");
     }
 
     void menuPageUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt)
     {
         const uint32_t menu = getRegU32(ctx, 4);
-        if (ctx->pc == kzAddrs().menuPageUpdate && menu >= 0x00100000u && menu < 0x02000000u && movieName(rdram, menu + 8) == "Logos")
+        if (rt)
+            g_ps2LastMenuTick.store(rt->eeScheduler().currentVSyncTick(), std::memory_order_relaxed);
+        if (g_skipLogos && ctx->pc == kzAddrs().menuPageUpdate && menu >= 0x00100000u && menu < 0x02000000u && movieName(rdram, menu + 8) == "Logos")
         {
             static int frames = 0;
             uint32_t ms = r32(rdram, menu + 0x170) + kLogoStepMs;
@@ -102,14 +129,16 @@ void kzMoviesInstall(PS2Runtime &runtime)
     if (const char *v = std::getenv("KZ_SKIP_LOGOS"); v && *v)
         g_skipLogos = std::atoi(v) != 0;
     g_logoLog = std::getenv("KZ_LOGO_LOG") != nullptr;
-    if (g_skipLogos)
+    // The menu page hook also tells the deterministic scheduler that a menu is on screen (EeScheduler.cpp, fork).
     {
         const uint32_t kUpdate = kzAddrs().menuPageUpdate;
         g_origMenuPageUpdate = runtime.hasFunction(kUpdate) ? runtime.lookupFunction(kUpdate) : nullptr;
         if (!g_origMenuPageUpdate || !runtime.replaceFunction(kUpdate, &menuPageUpdate))
             std::printf("[kz] logo skip hook FAILED\n");
     }
-    if (!g_skipIntro && !g_log)
+    // always hooked: it also flags movie playback for the deterministic scheduler
+    // KZ_MOVIE_HOOK=0 (test, 11-05): no hook unless the intro skip / log needs it (as before night 2)
+    if (const char *h = std::getenv("KZ_MOVIE_HOOK"); h && *h == '0' && !g_skipIntro && !g_log)
         return;
     const uint32_t kPlayMovie = kzAddrs().playMovie;
     g_origPlayMovie = runtime.hasFunction(kPlayMovie) ? runtime.lookupFunction(kPlayMovie) : nullptr;

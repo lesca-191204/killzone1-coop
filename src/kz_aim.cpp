@@ -3,6 +3,7 @@
 #include "kz_addrs.h"
 #include "kz_config.h"
 #include "kz_input.h"
+#include "kz_netplay.h"
 
 #include "ps2_runtime.h"
 
@@ -52,6 +53,17 @@ namespace
     PS2Runtime::RecompiledFunction g_vkAddChar = nullptr;
     PS2Runtime::RecompiledFunction g_vkBackspace = nullptr;
 
+    // Fork (KZ1 co-op): one aim state per player (index = the controller's player index, ctrl+0x1C). Outside a netplay
+    // session only player 0 (this PC's mouse). In a session (or KZ_NET_LATCH test) each player's mouse motion and
+    // keyboard/mouse flag come from the latched input (kz_netplay), the same on every PC, and no wall clock is used.
+    struct AimState
+    {
+        uint32_t player = 0, ctrl = 0;
+        float yawDebt = 0.0f, prevTurn = 0.0f, mouseRate = 0.0f, pendingPitch = 0.0f, ctrlDt = 0.0f;
+        bool kbm = false;
+    };
+    AimState g_aim[2];
+    bool g_netAim = false; // session mode (decided at install)
     uint32_t g_player = 0; // local player 0's entity
     uint32_t g_ctrl = 0;   // its controller
     bool g_announced = false;
@@ -62,11 +74,6 @@ namespace
     // debt (heading change still owed) and commands half of it per frame: the two steps of one command add up to the
     // debt at equal frame times, and the debt is charged with the frame times that really applied, so the total is
     // exact and nothing drifts. The effect is a two-frame average of the mouse motion.
-    float g_yawDebt = 0.0f;       // radians of heading still to apply
-    float g_prevTurn = 0.0f;      // mouse turn value commanded last frame (its second step happens this frame)
-    float g_mouseRate = 0.0f;     // turn value added this frame (log)
-    float g_pendingPitch = 0.0f;  // radians, applied in the next ApplyLook
-    float g_ctrlDt = 0.0f;        // frame timer dt read at the controller update
 
     uint32_t rd32(const uint8_t *rdram, uint32_t addr)
     {
@@ -242,121 +249,125 @@ namespace
         }
         const uint32_t ra = getRegU32(ctx, 31);
         const uint32_t ctrl = getRegU32(ctx, 4);
-        const bool local = ctx->pc == kzAddrs().ctrlUpdate && rd32(rdram, ctrl + 0x1C) == 0u;
+        const uint32_t idx = ctx->pc == kzAddrs().ctrlUpdate ? rd32(rdram, ctrl + 0x1C) : 0xFFFFFFFFu;
+        const bool session = g_netAim && kzNetActive();
+        const bool handled = idx == 0u || (session && idx == 1u);
         g_origCtrlUpdate(rdram, ctx, rt);
-        if (!local || ctx->pc != ra)
-            return; // not player 0, or the update yielded (it finishes later in guest code)
+        if (!handled || ctx->pc != ra)
+            return; // not a player we aim for, or the update yielded (it finishes later in guest code)
         const uint32_t player = rd32(rdram, ctrl + 0x18);
         if (player < 0x00100000u || player >= 0x02000000u)
             return;
+        AimState &st = g_aim[idx];
         if (!g_announced)
         {
-            std::printf("[kz] mouse aim: local player 0x%x\n", player);
+            std::printf("[kz] mouse aim: local player 0x%x%s\n", player,
+                        session ? " (netplay: every player's mouse from the latched input)" : "");
             g_announced = true;
         }
-        g_player = player;
-        g_ctrl = ctrl;
+        st.player = player;
+        st.ctrl = ctrl;
+        if (idx == 0u)
+        {
+            g_player = player;
+            g_ctrl = ctrl;
+        }
         kzInputSetAimPatchActive(true);
 
-        const auto now = std::chrono::steady_clock::now();
-        const double since = std::chrono::duration<double>(now - g_lastTake).count();
-        g_lastTake = now;
-        const KzMouseDelta d = kzInputTakeMouseDelta();
-        g_mouseRate = 0.0f;
-        g_pendingPitch = 0.0f;
-        g_ctrlDt = frameDt(rdram);
+        KzMouseDelta d{};
+        double since = 0.0;
+        if (session)
+        {
+            const KzNetInput &in = kzNetInputOf(static_cast<int>(idx));
+            d.dx = in.mouseDx();
+            d.dy = in.mouseDy();
+            st.kbm = in.kbm();
+        }
+        else
+        {
+            const auto now = std::chrono::steady_clock::now();
+            since = std::chrono::duration<double>(now - g_lastTake).count();
+            g_lastTake = now;
+            d = kzInputTakeMouseDelta();
+            st.kbm = kzInputUsingKeyboardMouse();
+        }
+        st.mouseRate = 0.0f;
+        st.pendingPitch = 0.0f;
+        st.ctrlDt = frameDt(rdram);
         if (g_log)
         {
             static const bool matrix = std::getenv("KZ_AIM_LOG") && std::getenv("KZ_AIM_LOG")[0] == '2';
             if (matrix)
-                std::printf("[kz-mtc] dt=%.5f heading=%.5f\n", g_ctrlDt, rdf(rdram, rd32(rdram, player + 0x31C) + 0x78));
+                std::printf("[kz-mtc] p%u dt=%.5f heading=%.5f\n", idx, st.ctrlDt, rdf(rdram, rd32(rdram, player + 0x31C) + 0x78));
         }
         const uint32_t ctl = rd32(rdram, player + 0x31C);
-        probeScope(rdram, player, ctl);
+        if (idx == 0u)
+            probeScope(rdram, player, ctl);
         const float zoom = rdf(rdram, ctl + 0x44C);
         const float turnSpeed = (zoom > 0.01f) ? rdf(rdram, ctl + 0x190) / zoom : 0.0f; // rad/s at turn value 1
-        const float dt = g_ctrlDt;
-        updateHoldAim(rdram, ctl);
-        const bool drop = since >= kStaleSeconds || !(turnSpeed > 0.01f) || !(dt > 0.0f);
-        if (g_log && (d.dx != 0.0f || d.dy != 0.0f)) // KZ_AIM_LOG: every mouse motion that reaches the patch, and why it is dropped
-            std::printf("[kz-aim] mouse dx=%.1f dy=%.1f %s since=%.3f turnSpeed=%.4f (ctl %08x +0x190=%.4f zoom=%.3f) dt=%.5f\n", d.dx, d.dy,
-                        drop ? "DROPPED" : "taken", since, turnSpeed, ctl, rdf(rdram, ctl + 0x190), zoom, dt);
+        const float dt = st.ctrlDt;
+        // Hold-to-aim pulses R3 on this PC's pad: only for the player this PC controls (the pulse then travels as input).
+        if (static_cast<int>(idx) == (session ? kzNetLocalPlayer() : 0))
+            updateHoldAim(rdram, ctl);
+        // Stale motion (menus, loading, pause) is a wall-clock test: only outside sessions. In a session the latched
+        // motion belongs to exactly this frame.
+        const bool drop = (!session && since >= kStaleSeconds) || !(turnSpeed > 0.01f) || !(dt > 0.0f);
+        if (g_log && (d.dx != 0.0f || d.dy != 0.0f))
+            std::printf("[kz-aim] p%u mouse dx=%.1f dy=%.1f %s since=%.3f turnSpeed=%.4f dt=%.5f\n", idx, d.dx, d.dy,
+                        drop ? "DROPPED" : "taken", since, turnSpeed, dt);
         if (drop)
         {
-            g_yawDebt = 0.0f; // menus, loading, pause: drop stale motion and any pending correction
-            g_prevTurn = 0.0f;
+            st.yawDebt = 0.0f;
+            st.prevTurn = 0.0f;
             return;
         }
         // The second step of last frame's command happens in this frame, with this frame's dt.
-        g_yawDebt -= g_prevTurn * turnSpeed * dt;
-        // Mouse right turns right: heading decreases (stick right gives a negative turn value). Mouse down is +dy and
-        // looking up is a positive pitch delta. Zoomed, both scale with the zoom factor like the stick does.
+        st.yawDebt -= st.prevTurn * turnSpeed * dt;
+        // Mouse right turns right: heading decreases. Mouse down is +dy and looking up is a positive pitch delta.
         const float scale = kRadPerCount / std::max(zoom, 1.0f);
-        g_yawDebt += -d.dx * scale;
-        g_pendingPitch = -d.dy * scale;
-        if (std::fabs(g_yawDebt) < 1e-7f && g_prevTurn == 0.0f)
+        st.yawDebt += -d.dx * scale;
+        st.pendingPitch = -d.dy * scale;
+        if (std::fabs(st.yawDebt) < 1e-7f && st.prevTurn == 0.0f)
         {
-            g_yawDebt = 0.0f;
+            st.yawDebt = 0.0f;
             return;
         }
-        g_mouseRate = g_yawDebt / (2.0f * turnSpeed * dt);
-        g_yawDebt -= g_mouseRate * turnSpeed * dt; // first step, this frame
-        g_prevTurn = g_mouseRate;
-        wrf(rdram, ctrl + 0x3C, rdf(rdram, ctrl + 0x3C) + g_mouseRate);
+        st.mouseRate = st.yawDebt / (2.0f * turnSpeed * dt);
+        st.yawDebt -= st.mouseRate * turnSpeed * dt; // first step, this frame
+        st.prevTurn = st.mouseRate;
+        wrf(rdram, ctrl + 0x3C, rdf(rdram, ctrl + 0x3C) + st.mouseRate);
     }
 
     void applyLook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt)
     {
-        const bool mine = ctx->pc == kzAddrs().applyLook && g_player != 0u && getRegU32(ctx, 4) == g_player;
-        if (!mine)
+        const uint32_t p = getRegU32(ctx, 4);
+        AimState *stp = nullptr;
+        if (ctx->pc == kzAddrs().applyLook)
+            for (AimState &a : g_aim)
+                if (a.player != 0u && a.player == p)
+                    stp = &a;
+        if (!stp)
         {
             g_origApplyLook(rdram, ctx, rt);
             return;
         }
-        const float dt = ctx->f[12];
-        const float rate = rdf(rdram, g_ctrl + 0x24 + 0x84);
-        ctx->f[14] += g_pendingPitch;
-        const float mousePitch = g_pendingPitch;
-        g_pendingPitch = 0.0f;
+        AimState &st = *stp;
+        ctx->f[14] += st.pendingPitch;
+        st.pendingPitch = 0.0f;
 
         // Keyboard/mouse: no camera lag or idle sway (the view follows the mouse 1:1). Pad play keeps them.
-        const uint32_t lagFlag = (g_player + 0x16Cu) & 0x01FFFFFFu;
-        const bool kbm = kzInputUsingKeyboardMouse();
+        const uint32_t lagFlag = (st.player + 0x16Cu) & 0x01FFFFFFu;
+        const bool kbm = st.kbm;
         const uint8_t savedFlag = rdram[lagFlag];
         if (kbm)
             rdram[lagFlag] = 0;
-        if (g_log)
-        {
-            static int n = 0;
-            if ((++n % 3) == 0 || g_mouseRate != 0.0f || mousePitch != 0.0f)
-                std::printf("[kz-aim] ctrlDt=%.5f dt=%.5f mouseTurn=%.3f debt=%.5f dPitch=%.4f pitch=%.4f\n", g_ctrlDt, dt,
-                            g_mouseRate, g_yawDebt, ctx->f[14], rdf(rdram, g_player + 0x14C));
-            // KZ_AIM_LOG=2: the character controller's transform (player+0x31C, matrix at +0x50) and mode (+0x454),
-            // to measure the real heading change of a turn.
-            static const bool matrix = std::getenv("KZ_AIM_LOG") && std::getenv("KZ_AIM_LOG")[0] == '2';
-            if (matrix)
-            {
-                const uint32_t ctl = rd32(rdram, g_player + 0x31C);
-                std::printf("[kz-mtx] mode=%u zoom=%.3f dt=%.5f turn=%.4f rateA8=%.4f heading=%.5f off164=%.5f off168=%.5f pitch=%.5f\n",
-                            rd32(rdram, ctl + 0x454), rdf(rdram, ctl + 0x44C), dt, rdf(rdram, g_ctrl + 0x3C), rate,
-                            rdf(rdram, ctl + 0x78), rdf(rdram, g_player + 0x164), rdf(rdram, g_player + 0x168),
-                            rdf(rdram, g_player + 0x14C));
-            }
-        }
         // Scope-type weapons (aim mode 2, e.g. the sniper rifle): right after ApplyLook the player update runs a reticle
-        // block that treats the turn value as a stick deflection, keeps a reticle offset (player+0x164/0x168) that tracks
-        // the stick, swallows the turn inside 45 % of the half field of view and rescales it beyond. A mouse turn command
-        // is not a stick position, so small moves vanished into the offset and the view sprang back, and big moves were
-        // clamped and rescaled. With keyboard/mouse the block is skipped: the player update sees mode 1 from here on
-        // (reticle offsets are then written as 0 and the turn value passes through like unzoomed), and the real mode is
-        // put back at the next call it makes after the block (0x218710). The swap is made before ApplyLook, not after it:
-        // when the guest yields inside ApplyLook this wrapper returns early and the rest of the update runs without it, so
-        // a swap after the call was skipped for that frame (reticle offset back for a frame under load). ApplyLook itself
-        // reads the mode only to choose "no camera lag", which the cleared lag flag above already selects with the mouse.
+        // block that treats the turn value as a stick deflection. With keyboard/mouse that block is skipped: the player
+        // update sees mode 1 until the next call it makes after the block (0x218710), where afterLook puts 2 back.
         static const bool fix = !(std::getenv("KZ_SCOPE_FIX") && std::getenv("KZ_SCOPE_FIX")[0] == '0');
         if (fix && kbm)
         {
-            const uint32_t ctl = rd32(rdram, g_player + 0x31C);
+            const uint32_t ctl = rd32(rdram, st.player + 0x31C);
             if (ctl && rd32(rdram, ctl + 0x454) == 2u)
             {
                 wr32(rdram, ctl + 0x454, 1u);
@@ -382,7 +393,16 @@ namespace
     void pitchAutoCentre(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt)
     {
         // With keyboard/mouse the player holds pitch with the mouse; the pad assist would drag the view to the horizon.
-        if (ctx->pc == kzAddrs().pitchAutoCentre && kzInputUsingKeyboardMouse())
+        // Which player (KZ1 co-op): the argument is matched against the known controllers/players, else player 0.
+        bool kbm = kzInputUsingKeyboardMouse();
+        if (g_netAim && kzNetActive())
+        {
+            kbm = g_aim[0].kbm;
+            for (const AimState &a : g_aim)
+                if (a.player && (getRegU32(ctx, 4) == a.ctrl || getRegU32(ctx, 4) == a.player))
+                    kbm = a.kbm;
+        }
+        if (ctx->pc == kzAddrs().pitchAutoCentre && kbm)
         {
             ctx->pc = getRegU32(ctx, 31);
             return;
@@ -475,6 +495,23 @@ void kzAimInstall(PS2Runtime &runtime)
     if (std::getenv("KZ_PAD_LOG"))
         hook(runtime, a.buttonValue, &buttonValue, g_origButtonValue);
 
+    // Fork (KZ1 co-op): in a netplay session the patch would change the simulation from this PC's own mouse, keyboard
+    // flag and wall-clock pulses, which the other PC never sees (desync). Until those travel with the latched input,
+    // sessions play with the mouse on the right stick.
+    // Fork (KZ1 co-op): in a netplay session (or the KZ_NET_LATCH test) every player's mouse motion and keyboard/mouse
+    // flag travel with the latched input, so the patch runs for both players from that (KZ_NET_AIM=0: patch off in
+    // sessions and the mouse on the right stick, the previous behaviour).
+    if (const char *n = std::getenv("KZ_NET"); n && (_stricmp(n, "host") == 0 || _stricmp(n, "join") == 0))
+    {
+        if (const char *o = std::getenv("KZ_NET_AIM"); o && *o == '0')
+        {
+            std::printf("[kz] mouse aim patch: off in netplay sessions (KZ_NET_AIM=0), mouse drives the right stick\n");
+            return;
+        }
+        g_netAim = true;
+    }
+    if (const char *l = std::getenv("KZ_NET_LATCH"); l && *l == '1')
+        g_netAim = true;
     if (const char *v = std::getenv("KZ_AIM"); v && std::strcmp(v, "off") == 0)
     {
         std::printf("[kz] mouse aim patch: off (KZ_AIM=off), mouse drives the right stick\n");

@@ -143,6 +143,9 @@ namespace
             std::printf("[kz-wide] %s %08x %.4f\n", what, a, f);
     }
 
+    uint32_t g_nativeFovCam = 0;
+    float g_nativeFov = 0.0f;
+
     void world(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt)
     {
         const bool entry = ctx->pc == kzAddrs().world;
@@ -178,11 +181,14 @@ namespace
                         saved = rdF(rdram, cam + 0x74);
                     wrF(rdram, cam + 0x70, scaleFov(savedFov, s));
                     fovChanged = true;
+                    g_nativeFovCam = cam;
+                    g_nativeFov = savedFov;
                 }
             }
         }
         const uint32_t ra = getRegU32(ctx, 31);
         g_origWorld(rdram, ctx, rt);
+        g_nativeFovCam = 0; // (kz_post LOD compensation: only during this world call)
         if (widened || fovChanged)
         {
             if ((ctx->pc == ra && !g_hold) || !g_defer)
@@ -392,6 +398,11 @@ namespace
 }
 
 float kzWideTargetAspect() { return g_target.load(std::memory_order_relaxed); }
+// The camera's own field of view while the FOV option has widened it for the world call in progress (0 otherwise).
+float kzWideNativeFov(float current)
+{
+    return g_nativeFovCam && current > g_nativeFov ? g_nativeFov : 0.0f;
+}
 
 void kzWideConfigure(KzAspect aspect, int windowWidth, int windowHeight)
 {

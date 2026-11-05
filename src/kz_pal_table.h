@@ -15,3 +15,8 @@
 void kzPalRegisterFunctionTable(PS2Runtime::RecompiledFunction *table, uint32_t base, uint32_t slotCount);
 extern const uint32_t kzPalRegisterFunctionTableEnd;
 #endif
+// Same scheme for the Spanish/Multi-6 disc SCES-52004 (generated_es, symbol_prefix = "kzes_").
+#if defined(KZ_HAVE_ES)
+void kzEsRegisterFunctionTable(PS2Runtime::RecompiledFunction *table, uint32_t base, uint32_t slotCount);
+extern const uint32_t kzEsRegisterFunctionTableEnd;
+#endif

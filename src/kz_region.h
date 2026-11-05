@@ -12,10 +12,12 @@ enum class KzRegion : uint8_t
 {
     Us,
     Pal,
+    Es, // SCES-52004, PAL Multi-6 (En/Nl/Fr/De/It/Es): own recompiled set (generated_es)
 };
 
 KzRegion kzRegion();
 inline bool kzIsPal() { return kzRegion() == KzRegion::Pal; }
+inline bool kzIsEs() { return kzRegion() == KzRegion::Es; }
 
 const char *kzRegionTitle(KzRegion r);      // "Killzone (USA)" / "Killzone (Europe)"
 const char *kzRegionSerial(KzRegion r);     // "SCUS-97402" / "SCES-52893"

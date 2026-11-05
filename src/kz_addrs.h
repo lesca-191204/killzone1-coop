@@ -101,6 +101,7 @@ struct KzAddrs
 
 extern const KzAddrs kKzAddrsUs;
 extern const KzAddrs kKzAddrsPal;
+extern const KzAddrs kKzAddrsEs; // SCES-52004 (kz_addrs_es.cpp)
 
 namespace kz_detail
 {

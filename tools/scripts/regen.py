@@ -3,7 +3,7 @@
 Steps: merge SCE library bindings from ps2_analyzer and missed function starts from find_code_pointers.py into the
 config (work/killzone.merged.toml), run ps2_recomp into work/gen_tmp, then copy changed/new files to generated/ and
 delete stale ones.
-Usage: python tools/scripts/regen.py [--pal]
+Usage: python tools/scripts/regen.py [--pal | --es]
 """
 import filecmp, os, re, shutil, subprocess, sys, tomllib
 
@@ -23,6 +23,9 @@ ROOT = Path(__file__).resolve().parents[2]
 # KZ_CODE_POINTERS_REJECT, KZ_MERGED, KZ_GEN_TMP, KZ_RECOMP_LOG); KZ_RECOMP_EXE picks another ps2_recomp.
 if "--pal" in sys.argv[1:]:
     os.environ.setdefault("KZ_CONFIG", str(ROOT / "config" / "killzone_pal.toml"))
+# Fork: --es regenerates the Spanish/Multi-6 set (SCES-52004, config/killzone_es.toml -> generated_es).
+if "--es" in sys.argv[1:]:
+    os.environ.setdefault("KZ_CONFIG", str(ROOT / "config" / "killzone_es.toml"))
 CFG = Path(os.environ.get("KZ_CONFIG", ROOT / "config" / "killzone.toml"))
 PRESETS = {
     "killzone": dict(KZ_ANALYZER_TOML="work/analyzer.toml", KZ_CODE_POINTERS="work/code_pointers.txt",
@@ -32,6 +35,10 @@ PRESETS = {
                          KZ_CODE_POINTERS_REJECT="work/pal/code_pointers_reject_pal.txt",
                          KZ_MERGED="work/pal/killzone_pal.merged.toml", KZ_GEN_TMP="work/pal/gen_tmp",
                          KZ_RECOMP_LOG="work/pal/recomp_pal.log"),
+    "killzone_es": dict(KZ_ANALYZER_TOML="work/es/analyzer_es.toml", KZ_CODE_POINTERS="work/es/code_pointers_es.txt",
+                        KZ_CODE_POINTERS_REJECT="work/es/code_pointers_reject_es.txt",
+                        KZ_MERGED="work/es/killzone_es.merged.toml", KZ_GEN_TMP="work/es/gen_tmp",
+                        KZ_RECOMP_LOG="work/es/recomp_es.log"),
 }
 if CFG.stem not in PRESETS:
     sys.exit(f"[regen] no path preset for {CFG.name}; add one to PRESETS in regen.py")

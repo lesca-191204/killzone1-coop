@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+extern std::atomic<const char *> g_ps2WorkerWait; // ps2_vif1_worker.cpp (fork): freeze diagnosis
+extern void (*g_ps2StallExtra)(char *, size_t);
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -26,6 +28,7 @@
 #include <memory>
 #include <mutex>
 
+std::atomic<int> g_kzShotNow{0};
 namespace
 {
     // Delegates to the CPU backend for uploads/VRAM access but skips drawing and presentation, which kzgs does.
@@ -558,7 +561,9 @@ namespace
         {
             const bool firstPresent = !presentedOnce;
             if (blockingThrottle)
-                kzgsVsync(field, regsChanged || firstPresent, job->wide), didPresent = true;
+                g_ps2WorkerWait.store("kzgs vsync (GPU thread more than N frames behind)", std::memory_order_relaxed),
+                kzgsVsync(field, regsChanged || firstPresent, job->wide), didPresent = true,
+                g_ps2WorkerWait.store("job vblank (GS present)", std::memory_order_relaxed);
             else
                 didPresent = kzgsVsyncTry(field, regsChanged || firstPresent, job->wide);
             if (didPresent)
@@ -570,6 +575,40 @@ namespace
         }
         if (didPresent)
             ++s.presentedSeq;
+        // KZ_GS_PRESENT_STATS=1: every 5 s, presented frames and frames with new content dropped because the GS was busy
+        static const bool presentStats = std::getenv("KZ_GS_PRESENT_STATS") && std::getenv("KZ_GS_PRESENT_STATS")[0] == '1';
+        // KZ_GS_PRESENT_LOG=path: one character per guest vblank: P presented, D dropped (GS busy), . unchanged
+        static std::FILE *presentLog = []() -> std::FILE * {
+            const char *e = std::getenv("KZ_GS_PRESENT_LOG");
+            return e && *e ? std::fopen(e, "w") : nullptr;
+        }();
+        if (presentLog)
+        {
+            std::fputc(didPresent ? 'P' : (newPackets || regsChanged) ? 'D' : '.', presentLog);
+            static uint32_t col = 0;
+            if (++col % 120 == 0)
+                std::fputc('\n', presentLog), std::fflush(presentLog);
+        }
+        if (presentStats)
+        {
+            static uint64_t nPresent = 0, nDrop = 0, nSame = 0;
+            static auto t0 = std::chrono::steady_clock::now();
+            if (didPresent)
+                ++nPresent;
+            else if (newPackets || regsChanged)
+                ++nDrop;
+            else
+                ++nSame;
+            const auto now = std::chrono::steady_clock::now();
+            if (now - t0 > std::chrono::seconds(5))
+            {
+                std::fprintf(stderr, "[kz] gs present: %llu presented, %llu dropped (GS busy), %llu unchanged in 5 s\n",
+                             static_cast<unsigned long long>(nPresent), static_cast<unsigned long long>(nDrop),
+                             static_cast<unsigned long long>(nSame));
+                nPresent = nDrop = nSame = 0;
+                t0 = now;
+            }
+        }
         if (s.burstArmed)
         {
             s.vblankLog.push_back({static_cast<long long>(s.frames.load(std::memory_order_relaxed)), field, didPresent ? 1 : 0,
@@ -585,6 +624,9 @@ namespace
         if (!s.shotDir.empty())
         {
             const auto now = std::chrono::steady_clock::now();
+            // KZ_SHOT_FRAMES (kz_coop): a screenshot at given game frames, for A/B comparisons at the same instant
+            if (g_kzShotNow.exchange(0) != 0)
+                saveShot(s, std::chrono::duration_cast<std::chrono::seconds>(now - s.start).count());
             if (now >= s.nextShot)
             {
                 s.nextShot = now + std::chrono::seconds(s.shotInterval);
@@ -653,6 +695,7 @@ bool kzGsAttach(PS2Runtime &runtime, void *hwnd, int windowHeight, const KzConfi
     hooks.gifPacket = &onGifPacket;
     hooks.vsync = &onVsync;
     hooks.vsyncOrdered = true; // onVsync sends its GS half through ps2RunAfterQueuedGif
+    g_ps2StallExtra = &kzgsDebugState;
     // Killzone never reads GS memory back (traces: only host->local transfers), so kzgs alone consumes the GIF
     // stream. KZ_SW_GS=1 keeps the runtime's software GS processing in parallel (debug).
     hooks.exclusive = !(std::getenv("KZ_SW_GS") && std::getenv("KZ_SW_GS")[0] == '1');
@@ -711,4 +754,14 @@ void kzGsSetScreenshotSchedule(const std::string &dir, int intervalSeconds)
 uint64_t kzGsFrameCount()
 {
     return gs().frames.load(std::memory_order_relaxed);
+}
+
+// fork (KZ1 co-op): present one frame with nothing but the banner (before the game boots: netplay waits)
+void kzGsIdlePresent()
+{
+    kzgsVsyncTry(0, true, false);
+}
+void kzGsBanner(const char *text)
+{
+    kzgsSetBanner(text);
 }

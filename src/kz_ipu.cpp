@@ -6,6 +6,7 @@
 #include "ps2_runtime.h"
 #include "runtime/ps2_host_ipu.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/ps2_mpeg_pacing.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -121,7 +122,8 @@ namespace
     {
         TraceFn &t = g_trace[I];
         const uint64_t n = ++t.calls;
-        const bool log = n <= 40 || (n & (n - 1)) == 0;
+        static const bool all = std::getenv("KZ_IPU_TRACE_ALL") != nullptr; // 11-05: every call (movie stream study)
+        const bool log = all || n <= 40 || (n & (n - 1)) == 0;
         const uint32_t a0 = getRegU32(ctx, 4), a1 = getRegU32(ctx, 5), a2 = getRegU32(ctx, 6), a3 = getRegU32(ctx, 7);
         const uint32_t ra = getRegU32(ctx, 31);
         char extra[160] = "";
@@ -131,7 +133,15 @@ namespace
             std::snprintf(extra, sizeof(extra), " dev=0x%x vt=0x%x +28=0x%x +38=0x%x h=0x%x", dev, vt,
                           guest32(rdram, vt + 0x28), guest32(rdram, vt + 0x38), guest32(rdram, a0 + 0xC));
         }
+        auto sys0 = [&]() -> uint32_t {
+            const uint32_t mp = guest32(rdram, kzAddrs().movieCurrentPlayer);
+            const uint32_t sy = mp ? guest32(rdram, mp + 0x40) : 0u;
+            return sy ? guest32(rdram, sy) : 0xFFFFFFFFu;
+        };
+        const uint32_t sysBefore = sys0();
         t.orig(rdram, ctx, rt);
+        if (all)
+            std::snprintf(extra + std::strlen(extra), sizeof(extra) - std::strlen(extra), " sys0 %x->%x", sysBefore, sys0());
         if (t.addr == kzAddrs().stRead) // stream read: log the total delivered when it first returns 0 (EOF or stall)
         {
             static uint32_t s_stream = 0, s_total = 0, s_lastLogged = ~0u;
@@ -280,6 +290,9 @@ namespace
             g_eofReads = 0;
         }
         ++g_eofReads;
+        static const bool ml = std::getenv("KZ_MOVIE_LOG") != nullptr; // 11-05 diag
+        if (ml)
+            std::printf("[kz] movie: disc read returned 0 -> end of file (read #%d, player %08x, stream %08x)\n", g_eofReads, player, stream);
         setReturnS32(ctx, -1);
     }
 
@@ -296,9 +309,58 @@ namespace
     }
 }
 
+// Movie picture pacing (issues #25, #26, #32). FUN_002df080 (PAL 0x2DFB80) is the movie object's per-frame step (vtable
+// +0x20; a0 = movie object, the player and its sceMpeg handle at a0 + 0x28). Its third argument says whether to show the
+// current picture again (non-zero, once there is one) or fetch a new one (0: FUN_002df6e8 -> sceMpegGetPicture). Both
+// callers, the blocking player FUN_0026ECC8 and the front end's background movie (0x1A8EBC), pass "vsync counter parity
+// differs from the parity latched at the first call", i.e. a new picture every other vblank:
+// 29.97 pictures per second at the PS2's 59.94 Hz. Here the guest vblank runs at the frame-rate setting, so they asked
+// for 30..120 pictures per second (60 at 120 Hz, 120 at 240 Hz). The libmpeg HLE then parked the thread inside
+// GetPicture until each picture's presentation tick, so the loop that also feeds the movie audio to the SPU2 and draws
+// the menu missed vblanks (intro at 120 Hz: ~24 waits per second, gaps between pictures up to 19 ticks instead of 4,
+// 28.9 pictures per second). The flag now comes from the HLE's movie clock (the MPEG stream's own timestamps on the vsync tick):
+// a new picture exactly when it is due, otherwise the current one, and GetPicture no longer has to wait.
+// KZ_MOVIE_PACE=0 restores the game's own flag.
+namespace
+{
+    PS2Runtime::RecompiledFunction g_movieStepOrig = nullptr;
+    constexpr uint32_t kMovieStepFromInputEnd = 0x780u; // FUN_002df800 - FUN_002df080 (PAL 0x2E0300 - 0x2DFB80)
+    constexpr uint32_t kMoviePlayerOffset = 0x28u;
+
+    void moviePacedStep(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt)
+    {
+        const uint32_t movie = getRegU32(ctx, 4);
+        const bool due = ps2_stubs::mpegPictureDue(movie + kMoviePlayerOffset, rt->eeScheduler().currentVSyncTick());
+        ctx->r[6] = _mm_set_epi64x(0, due ? 0 : 1); // $a2: 0 = fetch a new picture, 1 = keep the current one
+        g_movieStepOrig(rdram, ctx, rt);
+    }
+
+    void installMoviePacing(PS2Runtime &runtime)
+    {
+        // fork (KZ1 co-op, 11-05): off by default. With it, skipping a cutscene left the VIF1 worker inside one DMA job
+        // forever in co-op (both copies stopped at the same vblank, worker job never finished); KZ_MOVIE_PACE=1 = on.
+        const char *v = std::getenv("KZ_MOVIE_PACE");
+        if (!v || *v != '1')
+        {
+            std::cout << "[kz] movie pacing: the game's own (KZ_MOVIE_PACE=1 for the stream-clock pacing)" << std::endl;
+            return;
+        }
+        const uint32_t step = kzAddrs().movieInputEnd - kMovieStepFromInputEnd;
+        if (!runtime.hasFunction(step))
+        {
+            std::cerr << "[kz] movie pacing hook FAILED" << std::endl;
+            return;
+        }
+        g_movieStepOrig = runtime.lookupFunction(step);
+        runtime.replaceFunction(step, &moviePacedStep);
+    }
+}
+
 void kzIpuBindRuntime(PS2Runtime &runtime)
 {
     g_runtime = &runtime;
+    if (g_active)
+        installMoviePacing(runtime);
     const uint32_t kMovieRead = kzAddrs().movieRead;
     const uint32_t kInputEnd = kzAddrs().movieInputEnd;
     if (g_active && runtime.hasFunction(kMovieRead) && runtime.hasFunction(kInputEnd))

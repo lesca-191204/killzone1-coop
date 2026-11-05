@@ -1,0 +1,54 @@
+KILLZONE (PS2) - NATIVE ONLINE CO-OP CAMPAIGN
+=============================================
+PROTOTIPO EXPERIMENTAL, en desarrollo. La campaña completa todavía no se probó entera.
+Repo, versiones y reportes: https://github.com/lesca-191204/killzone1-coop
+
+Campaña de Killzone 1 para 2 jugadores por internet, sobre KillzoneRecomp.
+
+OBJETIVO
+Jugar la campaña COMPLETA de Killzone en cooperativo online, de principio a fin. Nada mas: no hay modos nuevos ni
+otras versiones del juego por ahora. El proyecto sigue segun el apoyo que tenga; el soporte es limitado.
+
+VERSION DEL JUEGO (SOLO ESTA)
+- Compatible: Killzone, disco español/europeo SCES-52004 (PAL, 6 idiomas), como ISO. No viene incluida.
+- NO compatible: EE.UU. SCUS-97402, el otro PAL SCES-52893, ni ninguna otra edicion. No hay planes de
+  soportar otras versiones por ahora. El launcher avisa si la ISO elegida es otra.
+- Idioma: launcher -> Controles y sonido -> Idioma (Español, English, Français, Deutsch, Italiano, Nederlands).
+  En co-op las dos PCs tienen que usar el mismo idioma.
+
+QUE HACE FALTA
+- La ISO SCES-52004, la misma en las dos PCs.
+- Windows 10/11 de 64 bits, CPU con SSE4.1 o mas nueva (las que tienen AVX2 van mas rapido).
+- Las dos PCs en la misma red virtual: Radmin VPN (recomendada, gratis: https://www.radmin-vpn.com/).
+  Uno crea una red en Radmin y el otro entra con el nombre y la contraseña.
+
+COMO JUGAR
+1. Abrir "KZ1 Coop.exe".
+2. Inicio: elegir la ISO.
+3. Co-op online:
+   - ANFITRION (jugador 1): elegir los FPS, "Crear partida" y pasarle tu IP de Radmin (empieza con 26.) al otro.
+   - INVITADO (jugador 2): elegir personaje, escribir la IP del anfitrion y "Unirse".
+   La primera vez Windows pregunta por el firewall: aceptar (redes privadas y publicas). Puerto UDP 47474.
+4. El anfitrion maneja los menus (nivel, dificultad, pausa). El invitado ve lo mismo.
+
+FPS
+- Los elige el anfitrion (30, 45, 60 o 90; por defecto 60) y el invitado juega con el mismo valor.
+- Las dos PCs simulan la misma partida cuadro a cuadro: si una PC no llega, la otra la espera. La partida entera
+  va mas lenta (camara lenta) pero no se desincroniza. En ese caso bajar a 45 o 30.
+
+PROBLEMAS CONOCIDOS
+- Al ganar un nivel y darle a Continuar, el paso al siguiente a veces se traba o se cierra.
+  Solucion: cerrar el juego los dos, volver a entrar y elegir el nivel siguiente desde el menu.
+- Personaje del invitado: se usa desde el capitulo en que aparece en la historia. Antes, el jugador 2 tiene el
+  mismo modelo que el jugador 1.
+- Tecla Tab / SELECT (lista de objetivos) desactivada en co-op.
+
+A TENER EN CUENTA
+- La partida guardada es la del anfitrion (la misma que usa al jugar solo).
+- Las DOS PCs tienen que tener la MISMA version del launcher.
+- Cada uno tiene sus propios graficos, resolucion y controles (Ajustes del launcher).
+- Si un jugador muere, reaparece a los 5 segundos junto al otro.
+
+SI ALGO FALLA
+Guardar la carpeta "logs" de las DOS PCs antes de volver a abrir el juego (se guardan solo las ultimas 3
+partidas) y mandarla en un issue de GitHub o en el Discord. Cada reporte ayuda a terminarlo mas rapido.

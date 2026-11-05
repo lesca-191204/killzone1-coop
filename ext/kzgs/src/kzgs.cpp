@@ -607,6 +607,8 @@ namespace
 			std::this_thread::sleep_for(std::chrono::milliseconds(cfg.stall_ms));
 	}
 
+	// fork (11-05, freeze diagnosis): what the GS thread is doing (0 idle, 1 transfer, 2 vsync/present, 3 other)
+	std::atomic<int> s_gs_state{0};
 	static void GSThreadLoop()
 	{
 		u64 r = s_read_pos.load(std::memory_order_relaxed);
@@ -621,10 +623,12 @@ namespace
 				w = s_write_pos.load(std::memory_order_seq_cst);
 				if (w != r)
 					break;
+				s_gs_state.store(0, std::memory_order_relaxed);
 				s_write_pos.wait(w, std::memory_order_acquire);
 				w = s_write_pos.load(std::memory_order_acquire);
 			}
 			s_consumer_sleeping.store(0, std::memory_order_relaxed);
+			s_gs_state.store(3, std::memory_order_relaxed);
 			if (was_idle && s_trace_fn)
 				s_trace_idle_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - idle_t0).count();
 
@@ -638,6 +642,7 @@ namespace
 					break;
 
 				case Cmd::Transfer:
+					s_gs_state.store(1, std::memory_order_relaxed);
 					DoTransfer(hdr.a, payload, hdr.b);
 					break;
 
@@ -651,6 +656,7 @@ namespace
 					if (s_present_log_path) QueryPerformanceCounter(&t0);
 					s_cur_field = static_cast<int>(hdr.a);
 					ApplyFrameAspect((hdr.b & 2u) != 0);
+					s_gs_state.store(2, std::memory_order_relaxed);
 					GSvsync(hdr.a, (hdr.b & 1u) != 0);
 					if (s_present_log_path)
 					{
@@ -903,6 +909,21 @@ extern std::atomic<bool> g_kzgs_show_fps; // shim/ImGuiShim.cpp
 void kzgsSetShowFps(bool show)
 {
 	g_kzgs_show_fps.store(show, std::memory_order_relaxed);
+}
+
+extern void kzgsBannerSet(const char *text); // shim/ImGuiShim.cpp
+void kzgsDebugState(char *buf, size_t n)
+{
+	static const char *const names[] = {"idle (waiting for commands)", "GIF transfer", "vsync/present", "command"};
+	const int st = s_gs_state.load(std::memory_order_relaxed);
+	std::snprintf(buf, n, "gs thread: %s, ring write %llu read %llu, queued frames %d, producer waiting %d", names[st & 3],
+	              static_cast<unsigned long long>(s_write_pos.load()), static_cast<unsigned long long>(s_read_pos.load()),
+	              static_cast<int>(s_queued_frames.load()), static_cast<int>(s_producer_waiting.load()));
+}
+
+void kzgsSetBanner(const char *text)
+{
+	kzgsBannerSet(text ? text : "");
 }
 
 void kzgsVsync(int field, bool regsWritten, bool wide)

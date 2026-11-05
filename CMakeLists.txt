@@ -128,6 +128,33 @@ else()
                    "the PAL disc (SCES-52893) is not supported")
 endif()
 
+# Fork: the Spanish/Multi-6 disc SCES-52004, same scheme as the PAL set (symbol_prefix = "kzes_",
+# table_register_function = "kzEsRegisterFunctionTable", config/killzone_es.toml, regen.py --es).
+set(KZ_GENERATED_ES_DIR "${CMAKE_SOURCE_DIR}/generated_es" CACHE PATH "PS2Recomp output for SCES_520.04 (Multi-6); empty = no SCES-52004")
+set(KZ_HAVE_ES OFF)
+if(KZ_GENERATED_ES_DIR AND EXISTS "${KZ_GENERATED_ES_DIR}/register_functions.cpp")
+    file(STRINGS "${KZ_GENERATED_ES_DIR}/register_functions.cpp" _kz_es_end REGEX "kzEsRegisterFunctionTableEnd = 0x" LIMIT_COUNT 1)
+    file(STRINGS "${KZ_GENERATED_DIR}/register_functions.cpp" _kz_us_end2 REGEX "g_ps2RecompiledFunctionTableEnd = 0x" LIMIT_COUNT 1)
+    string(REGEX MATCH "0x[0-9a-fA-F]+" _kz_es_end "${_kz_es_end}")
+    string(REGEX MATCH "0x[0-9a-fA-F]+" _kz_us_end2 "${_kz_us_end2}")
+    if(NOT _kz_es_end)
+        message(FATAL_ERROR "Killzone: ${KZ_GENERATED_ES_DIR} was not generated with table_register_function = kzEsRegisterFunctionTable")
+    endif()
+    if(_kz_us_end2)
+        math(EXPR _kz_es_end_n "${_kz_es_end}")
+        math(EXPR _kz_us_end2_n "${_kz_us_end2}")
+        if(_kz_es_end_n GREATER _kz_us_end2_n)
+            message(FATAL_ERROR "Killzone: the SCES-52004 code ends at ${_kz_es_end} but the US function table ends at ${_kz_us_end2}: raise table_end_min")
+        endif()
+    endif()
+    file(GLOB KZ_GENERATED_ES_SRC CONFIGURE_DEPENDS "${KZ_GENERATED_ES_DIR}/*.cpp")
+    list(LENGTH KZ_GENERATED_ES_SRC KZ_GENERATED_ES_COUNT)
+    set(KZ_HAVE_ES ON)
+    message(STATUS "Killzone: ${KZ_GENERATED_ES_COUNT} SCES-52004 generated sources (Spanish/Multi-6 disc supported)")
+else()
+    message(STATUS "Killzone: no SCES-52004 generated code; the Spanish/Multi-6 disc is not supported")
+endif()
+
 file(GLOB KZ_SRC CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/*.cpp")
 
 # Our code lives in its own library so its dependencies (SDL3, ImGui, ...) never change the compile flags of the
@@ -144,6 +171,9 @@ target_link_libraries(kz_port PRIVATE ps2_runtime SDL3::SDL3 imgui kz_pcsx2_libs
 target_compile_definitions(kz_port PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 if(KZ_HAVE_PAL)
     target_compile_definitions(kz_port PRIVATE KZ_HAVE_PAL=1) # src/kz_region.cpp fills the function table from the PAL set
+endif()
+if(KZ_HAVE_ES)
+    target_compile_definitions(kz_port PRIVATE KZ_HAVE_ES=1)
 endif()
 # The CPU check runs before the C runtime on any x64 CPU, so it is built without AVX2 (src/kz_cpucheck.cpp, issue #14).
 # KZ_CPUCHECK_ISA tells it which instructions this build needs: 0 = MULTI, 1 = SSE4, 2 = AVX2.
@@ -243,6 +273,24 @@ if(KZ_HAVE_PAL)
     # Only its objects: linking the object library would add its ps2_runtime dependency again at the end of the link line,
     # which moves raylib behind OneCore.lib/winmm.lib (LNK2005 CloseWindow / PlaySound).
     target_sources(killzone PRIVATE $<TARGET_OBJECTS:kz_generated_pal>)
+endif()
+if(KZ_HAVE_ES)
+    add_library(kz_generated_es OBJECT ${KZ_GENERATED_ES_SRC})
+    target_include_directories(kz_generated_es PRIVATE "${KZ_GENERATED_ES_DIR}")
+    target_link_libraries(kz_generated_es PRIVATE ps2_runtime)
+    set_target_properties(kz_generated_es PROPERTIES UNITY_BUILD ON UNITY_BUILD_BATCH_SIZE 128)
+    target_precompile_headers(kz_generated_es PRIVATE
+        ext/PS2Recomp/ps2xRuntime/include/ps2_runtime_macros.h
+        ext/PS2Recomp/ps2xRuntime/include/ps2_runtime.h
+        "${KZ_GENERATED_ES_DIR}/ps2_recompiled_functions.h"
+        "${KZ_GENERATED_ES_DIR}/ps2_recompiled_stubs.h"
+        ext/PS2Recomp/ps2xRuntime/include/ps2_syscalls.h
+        ext/PS2Recomp/ps2xRuntime/include/ps2_stubs.h
+    )
+    if(MSVC)
+        target_compile_options(kz_generated_es PRIVATE /bigobj /FS)
+    endif()
+    target_sources(killzone PRIVATE $<TARGET_OBJECTS:kz_generated_es>)
 endif()
 
 # Copy FFmpeg runtime DLLs next to killzone.exe (helper from ps2xRuntime).

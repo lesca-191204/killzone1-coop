@@ -19,3 +19,6 @@ dist/
 tools/pcsx2_par/
 generated_pal/
 pin-tool-log.txt
+generated_es/
+launcher/__pycache__/
+*.orig

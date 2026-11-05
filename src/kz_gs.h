@@ -27,3 +27,6 @@ void kzGsSetScreenshotSchedule(const std::string &dir, int intervalSeconds);
 
 // Frames presented so far (vblanks forwarded to kzgs).
 uint64_t kzGsFrameCount();
+// fork (KZ1 co-op): on-screen banner ("" = none) and a banner-only present for the pre-boot netplay waits
+void kzGsBanner(const char *text);
+void kzGsIdlePresent();
