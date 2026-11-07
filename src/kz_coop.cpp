@@ -15,6 +15,8 @@
 //                                           it to a string, is printed after the call ("[kz] lua: ...").
 #include "kz_coop.h"
 
+#include <unordered_map>
+
 #include "kz_addrs.h"
 #include "kz_netplay.h"
 #include "kz_region.h"
@@ -42,6 +44,7 @@ extern std::atomic<uint32_t> g_ps2GsMuteList[2][2];
 extern std::atomic<bool> g_ps2MuteSkip;
 extern std::atomic<uint32_t> g_ps2ViewStarts;
 
+void kzPageWatch(uint8_t *ram, uint32_t guest, uint32_t bytes);
 namespace
 {
     constexpr uint32_t kRamMask = 0x01FFFFFFu;
@@ -293,6 +296,24 @@ bool kzCoopNative()
 
 bool kzCoopFrame(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, uint32_t frame)
 {
+    // KZ_GC_BUDGET=<bytes> (tests): the resource cache DAT_00559df0 (FUN_00189f20, called every frame from the player view
+    // loop FUN_001c32c0) frees unused resources once the sum of their sizes (FUN_00188870) passes its budget at +0x8C.
+    // A small budget makes that cleanup run all the time (does it free something the second player still uses?).
+    static const char *gcBudget = std::getenv("KZ_GC_BUDGET");
+    if (gcBudget && *gcBudget)
+    {
+        const uint32_t cache = rd32(rdram, 0x00559DF0u);
+        if (cache >= 0x100000u && cache < 0x02000000u)
+        {
+            static uint32_t orig = 0;
+            if (!orig)
+            {
+                orig = rd32(rdram, cache + 0x8C);
+                std::cout << "[kz] gc: resource cache " << std::hex << cache << " budget " << std::dec << orig << " -> " << gcBudget << std::endl;
+            }
+            wr32(rdram, cache + 0x8C, static_cast<uint32_t>(std::strtoul(gcBudget, nullptr, 0)));
+        }
+    }
     // back to two players if something (a checkpoint restore that yielded) left the game with one
     if (frame > 30 && frame % 30 == 10 && kzNetHasPlayer2() && !g_levelChangePending && !g_addP2At)
         kzCoopEnsureTwo(rdram, ctx, rt);
@@ -430,9 +451,16 @@ bool kzCoopFrame(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, uint32_t fra
                       << " (ctl " << std::hex << to << std::dec << ")" << std::endl;
         }
     }
-    for (auto &[f, code] : g_luaScript)
-        if (f == frame)
-            g_luaQueue.push_back(code);
+    // KZ_LUA_ONCE=1 (tests): each entry runs once in the whole session (the frame count restarts with every level)
+    static const bool luaOnce = std::getenv("KZ_LUA_ONCE") && *std::getenv("KZ_LUA_ONCE") == '1';
+    for (auto it = g_luaScript.begin(); it != g_luaScript.end();)
+        if (it->first == frame)
+        {
+            g_luaQueue.push_back(it->second);
+            it = luaOnce ? g_luaScript.erase(it) : it + 1;
+        }
+        else
+            ++it;
     // Player 2 joins at game frame 30 of a level when a second player takes part (netplay session or local test), on
     // every PC at the same frame. Same character as player 1 (its model is always loaded; other protagonists need their
     // resources cached by the level, see the report). gGamePlayInfo keeps two players for the next levels and checkpoint
@@ -1080,6 +1108,22 @@ namespace
     // rebuild destroys: later releases and uses broke the heap (both games hung in malloc, black screen). Before the
     // restore the slot is destroyed the game's own way (SetNrOfPlayers(1)); after it, 2 players again (configureP2) and
     // the watchdog brings player 2 back (the level is not reloaded: its model stays cached).
+    PS2Runtime::RecompiledFunction g_origLevelUnlocked = nullptr;
+    bool g_allLevelsEnv = false;
+    void allLevelsWrap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt)
+    {
+        // only with KZ_ALL_LEVELS=1 (launcher option, off by default). Not forced in sessions: the main menu's Continue
+        // also asks this function, and with everything unlocked it starts the LAST level (11.OTS). In a session both PCs
+        // must have the same setting (menus are simulated in lockstep; a mismatch shows as a desync).
+        if (!g_allLevelsEnv)
+        {
+            g_origLevelUnlocked(rdram, ctx, rt);
+            return;
+        }
+        setReg(ctx, 2, 1);
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
     PS2Runtime::RecompiledFunction g_origCpRestore = nullptr;
     void callSetNr(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt, uint32_t gpi, uint32_t n)
     {
@@ -1254,8 +1298,10 @@ namespace
         if (s)
             for (int i = 0; i < 23; ++i)
                 chr[i] = static_cast<char>(rdram[(s + 0x40 + i) & 0x01FFFFFFu]);
-        std::fprintf(stderr, "[kz] coop: CreatePlayer slot %u ra %08x n %d char '%s' prof %08x joy %d fn %02x actor %08x ctl %08x\n",
-                     slot, ra, gpi ? static_cast<int>(rd32(rdram, gpi + 0x218)) : -1, chr, s ? rd32(rdram, s + 0x80) : 0,
+        const uint32_t profP = s ? rd32(rdram, s + 0x80) : 0;
+        std::fprintf(stderr, "[kz] coop: CreatePlayer slot %u ra %08x n %d char '%s' prof %08x (refs %d) joy %d fn %02x actor %08x ctl %08x\n",
+                     slot, ra, gpi ? static_cast<int>(rd32(rdram, gpi + 0x218)) : -1, chr, profP,
+                     profP >= 0x100000u && profP < 0x02000000u ? static_cast<int>(rd32(rdram, profP + 4)) : -1,
                      s ? static_cast<int>(rd32(rdram, s + 0x84)) : 0, s ? rdram[(s + 0x89) & 0x01FFFFFFu] : 0,
                      s ? rd32(rdram, s + 0xD4) : 0, s ? rd32(rdram, s + 0xD8) : 0);
         auto str = [&](uint32_t a) {
@@ -1455,6 +1501,10 @@ namespace
     PS2Runtime::RecompiledFunction g_origPathCtor = nullptr, g_origPathDtor = nullptr, g_origFree = nullptr,
                                    g_origMalloc = nullptr;
     std::vector<uint32_t> g_paths;
+    // KZ_HEAP_WATCH=<address> (diagnosis): log every malloc/free of a block that contains that address, with the stack
+    uint32_t g_heapWatch = 0;
+    int g_heapLogs = 0;
+    std::unordered_map<uint32_t, uint32_t> g_heapSizes;
     uint32_t g_pathInDtor = 0;
     int g_pathLogs = 0;
     void pathStack(const uint8_t *rdram, const R5900Context *ctx)
@@ -1532,6 +1582,20 @@ namespace
     void freeWrap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt)
     {
         const uint32_t p = reg(ctx, 4);
+        if (g_heapWatch && p)
+        {
+            auto it = g_heapSizes.find(p);
+            const uint32_t size = it != g_heapSizes.end() ? it->second : 0x40u;
+            if (g_heapWatch >= p && g_heapWatch < p + size && g_heapLogs < 60)
+            {
+                ++g_heapLogs;
+                std::fprintf(stderr, "[kz] heap: WATCH free(%08x) size %x%s holds %08x (frame %u)\n", p, size,
+                             it != g_heapSizes.end() ? "" : " (size unknown)", g_heapWatch, g_frameNow);
+                pathStack(rdram, ctx);
+            }
+            if (it != g_heapSizes.end())
+                g_heapSizes.erase(it);
+        }
         uint32_t arr = 0, count = 0;
         if (p && !g_paths.empty() && g_pathLogs < 40)
             if (const uint32_t obj = pathOwner(rdram, p, arr, count))
@@ -1548,6 +1612,20 @@ namespace
         const uint32_t ra = reg(ctx, 31), sp = reg(ctx, 29), a0 = reg(ctx, 4), a1 = reg(ctx, 5);
         g_origMalloc(rdram, ctx, rt);
         const uint32_t p = reg(ctx, 2);
+        if (g_heapWatch && p)
+        {
+            const uint32_t size = a0 ? a0 : 1u;
+            g_heapSizes[p] = size;
+            if (g_heapWatch >= p && g_heapWatch < p + size && g_heapLogs < 60)
+            {
+                ++g_heapLogs;
+                std::fprintf(stderr, "[kz] heap: WATCH malloc(%x, %x) = %08x holds %08x (frame %u)\n", a0, a1, p, g_heapWatch, g_frameNow);
+                R5900Context c = *ctx;
+                setReg(&c, 29, sp);
+                setReg(&c, 31, ra);
+                pathStack(rdram, &c);
+            }
+        }
         uint32_t arr = 0, count = 0;
         if (p && !g_paths.empty() && g_pathLogs < 40)
             if (const uint32_t obj = pathOwner(rdram, p, arr, count))
@@ -1561,8 +1639,89 @@ namespace
                 pathStack(rdram, &c);
             }
     }
+    // ---- Stream table check (11-07, ES, Ghidra). Real session (30 fps, 1.HQGrounds -> 2.Offices) and the 2.Offices jump at
+    // 30 fps: FUN_0018adc0 (stream manager sweep, caller FUN_00189f20) walks the resource table [mgr+0x54] (entries of
+    // 0xC bytes: object*, u16 +4, u16 +6, u16 +8; count [mgr+0x4C]) and calls object->vtable[0x5C]; entry 381 held
+    // 0x00050050 (not an object) -> JALR 0x18ae40 -> 0 and the main thread is gone. KZ_STREAM_CHECK=0 turns this off.
+    // KZ_STREAM_PW=<guest hex>: once a stream table holding that address is seen, its 0x40 bytes there get the page watch.
+    constexpr uint32_t kStreamSweep = 0x0018ADC0u;
+    PS2Runtime::RecompiledFunction g_origStreamSweep = nullptr;
+    uint32_t g_streamArr = 0, g_streamN = 0;
+    int g_streamLogs = 0;
+    bool streamEntryOk(const uint8_t *rdram, PS2Runtime *rt, uint32_t obj)
+    {
+        if (obj < 0x00100000u || obj >= 0x02000000u || (obj & 3u))
+            return false;
+        const uint32_t vt = rd32(rdram, obj);
+        if (vt < 0x00500000u || vt >= 0x00560000u || (vt & 3u))
+            return false;
+        const uint32_t fn = rd32(rdram, vt + 0x5C);
+        return fn && rt->hasFunction(fn);
+    }
+    void streamSweepWrap(uint8_t *rdram, R5900Context *ctx, PS2Runtime *rt)
+    {
+        const uint32_t mgr = reg(ctx, 4);
+        const uint32_t n = rd32(rdram, mgr + 0x4C), arr = rd32(rdram, mgr + 0x54);
+        static const uint32_t pw = std::getenv("KZ_STREAM_PW") ? static_cast<uint32_t>(std::strtoul(std::getenv("KZ_STREAM_PW"), nullptr, 16)) : 0u;
+        static bool pwArmed = false;
+        if (pw && !pwArmed && arr && pw >= arr && pw < arr + rd32(rdram, mgr + 0x50) * 0xCu)
+        {
+            pwArmed = true;
+            kzPageWatch(rdram, pw, 0x40);
+        }
+        // KZ_PW_FIXED=<guest hex>[,bytes]: page watch on a fixed guest range from the first sweep on (e.g. 1f10088,4 =
+        // the runtime's RPC server data 'buf' field of the sound driver, 11-07)
+        static bool fixedArmed = false;
+        if (!fixedArmed)
+        {
+            fixedArmed = true;
+            if (const char *f = std::getenv("KZ_PW_FIXED"); f && *f)
+            {
+                unsigned a = 0, b = 4;
+                std::sscanf(f, "%x,%x", &a, &b);
+                kzPageWatch(rdram, a, b);
+            }
+        }
+        if (arr != g_streamArr || n != g_streamN)
+        {
+            if (g_streamLogs < 400 && (arr != g_streamArr || n < g_streamN || n % 64 == 0))
+            {
+                ++g_streamLogs;
+                std::fprintf(stderr, "[kz] stream: mgr %08x table %08x count %u (was %08x/%u) +48=%08x +50=%08x\n", mgr,
+                             arr, n, g_streamArr, g_streamN, rd32(rdram, mgr + 0x48), rd32(rdram, mgr + 0x50));
+            }
+            g_streamArr = arr;
+            g_streamN = n;
+        }
+        if (arr >= 0x00100000u && arr < 0x02000000u && n < 0x10000u)
+            for (uint32_t i = 1; i < n; ++i)
+            {
+                const uint32_t e = arr + i * 0xCu, obj = rd32(rdram, e);
+                if (streamEntryOk(rdram, rt, obj))
+                    continue;
+                if (g_streamLogs < 400)
+                {
+                    ++g_streamLogs;
+                    std::fprintf(stderr, "[kz] stream: BAD entry %u of %u in table %08x (mgr %08x): %08x %08x %08x\n", i,
+                                 n, arr, mgr, obj, rd32(rdram, e + 4), rd32(rdram, e + 8));
+                    for (uint32_t k = (i > 4 ? i - 4 : 0); k < i + 5 && k < n; ++k)
+                        std::fprintf(stderr, "[kz] stream:   [%u] @%08x %08x %08x %08x\n", k, arr + k * 0xCu,
+                                     rd32(rdram, arr + k * 0xCu), rd32(rdram, arr + k * 0xCu + 4),
+                                     rd32(rdram, arr + k * 0xCu + 8));
+                    pathStack(rdram, ctx);
+                }
+                break;
+            }
+        g_origStreamSweep(rdram, ctx, rt);
+    }
     void pathGuardInstall(PS2Runtime &runtime)
     {
+        if (kzIsEs() && !(std::getenv("KZ_STREAM_CHECK") && *std::getenv("KZ_STREAM_CHECK") == '0'))
+        {
+            g_origStreamSweep = runtime.lookupFunction(kStreamSweep);
+            if (!g_origStreamSweep || !runtime.replaceFunction(kStreamSweep, &streamSweepWrap))
+                std::cerr << "[kz] stream: sweep check hook failed" << std::endl;
+        }
         if (!kzIsEs() || (std::getenv("KZ_PATH_GUARD") && *std::getenv("KZ_PATH_GUARD") == '0'))
             return;
         g_origPathCtor = runtime.lookupFunction(kPathCtor);
@@ -1573,7 +1732,9 @@ namespace
             std::cerr << "[kz] path: PathResource guard hooks failed" << std::endl;
             return;
         }
-        if (std::getenv("KZ_PATH_WATCH") && *std::getenv("KZ_PATH_WATCH") == '0')
+        if (const char *hw = std::getenv("KZ_HEAP_WATCH"); hw && *hw)
+            g_heapWatch = static_cast<uint32_t>(std::strtoul(hw, nullptr, 16));
+        if (std::getenv("KZ_PATH_WATCH") && *std::getenv("KZ_PATH_WATCH") == '0' && !g_heapWatch)
             return;
         g_origFree = runtime.lookupFunction(kFree);
         g_origMalloc = runtime.lookupFunction(kMalloc);
@@ -1605,6 +1766,18 @@ namespace
         }
         if (!kzIsEs() || std::getenv("KZ_COOP_NOCONFIG"))
             return;
+        // KZ_ALL_LEVELS=1: every chapter and sub-level is available in the campaign menu. FUN_001d7658(profile, level) is
+        // the game's "level unlocked?" test (names Shooterman / Shooterman2 at 0x5447EC/F7, else profile state +0x2D4 > 0);
+        // it returns 1, as the published PAL raw code 201D7704 24020001 does. Nothing is written to the memory card.
+        {
+            const char *e = std::getenv("KZ_ALL_LEVELS");
+            g_allLevelsEnv = e && *e == '1';
+            g_origLevelUnlocked = runtime.lookupFunction(0x001D7658u);
+            if (!g_origLevelUnlocked || !runtime.replaceFunction(0x001D7658u, &allLevelsWrap))
+                std::cerr << "[kz] all levels: hook failed" << std::endl;
+            else if (g_allLevelsEnv)
+                std::cout << "[kz] campaign: every chapter available (KZ_ALL_LEVELS=1)" << std::endl;
+        }
         g_origCpRestore = runtime.lookupFunction(0x001C5F08u);
         g_origCpSave = runtime.lookupFunction(0x001C5798u);
         g_setSlotPlayer = runtime.lookupFunction(0x001B9E00u);

@@ -34,11 +34,11 @@ COMO JUGAR
 FPS
 - Los elige el anfitrion (30, 45, 60 o 90; por defecto 60) y el invitado juega con el mismo valor.
 - Las dos PCs simulan la misma partida cuadro a cuadro: si una PC no llega, la otra la espera. La partida entera
-  va mas lenta (camara lenta) pero no se desincroniza. En ese caso bajar a 45 o 30.
+  va mas lenta (camara lenta) pero no se desincroniza. En ese caso bajar a 30 (45 se desincronizo entre dos PCs).
 
 PROBLEMAS CONOCIDOS
-- Al ganar un nivel y darle a Continuar, el paso al siguiente a veces se traba o se cierra.
-  Solucion: cerrar el juego los dos, volver a entrar y elegir el nivel siguiente desde el menu.
+- v0.3.3 arregla la causa de los cuelgues al pasar de nivel (memoria del sonido pisada). Si igual se traba:
+  cerrar el juego los dos, volver a entrar y elegir el nivel siguiente desde el menu, y reportarlo con logs.
 - Personaje del invitado: se usa desde el capitulo en que aparece en la historia. Antes, el jugador 2 tiene el
   mismo modelo que el jugador 1.
 - Tecla Tab / SELECT (lista de objetivos) desactivada en co-op.
@@ -52,5 +52,5 @@ A TENER EN CUENTA
 SI ALGO FALLA
 Los problemas se reportan SOLO en GitHub Issues y SIEMPRE con logs (lo que llegue por Discord o sin logs no se
 toma): https://github.com/lesca-191204/killzone1-coop/issues
-Guardar la carpeta "logs" de las DOS PCs antes de volver a abrir el juego (se guardan solo las ultimas 3
+Guardar la carpeta "logs" de las DOS PCs antes de volver a abrir el juego (se guardan las ultimas 10
 partidas), comprimirla y adjuntarla al issue. Cada reporte ayuda a terminarlo mas rapido.

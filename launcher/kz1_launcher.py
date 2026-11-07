@@ -18,7 +18,7 @@ import time
 import webbrowser
 from pathlib import Path
 
-VERSION = '0.3.2'
+VERSION = '0.3.3'
 DONATE_URL = 'https://www.paypal.com/paypalme/SantiagoLescano577'
 DISCORD_URL = 'https://discord.gg/UYFcV5rbDw'
 RADMIN_URL = 'https://www.radmin-vpn.com/'
@@ -45,7 +45,7 @@ ICON_PNG = BASE / 'launcher' / 'kz1.png'
 # Session frame rate (host's choice, sent to the joiner): game frames per second. 30 = the PS2's own pace.
 FPS_CHOICES = [
     (30, '30 FPS', 'Como en PS2. Para PCs justas'),
-    (45, '45 FPS', 'Intermedio'),
+    (45, '45 FPS', 'No recomendado: se desincroniza'),
     (60, '60 FPS', 'Recomendado'),
     (90, '90 FPS', 'Solo PCs muy potentes'),
 ]
@@ -102,7 +102,7 @@ TEXTS = {
     'coop_fps': 'Cuadros por segundo de la partida',
     'coop_fps_help': 'Lo elige el anfitrión y el invitado juega con el mismo valor. Las dos PCs tienen que poder '
                      'sostenerlo: si una no llega, la partida entera va un poco más lenta (no se desincroniza). Si notás '
-                     'cámara lenta, bajá a 45 o 30.',
+                     'cámara lenta, bajá a 30. Evitá 45: en la prueba del 07/11 se desincronizó.',
     'coop_host_button': 'Crear partida',
     'coop_join': 'Unirse',
     'coop_join_sub': 'Sos el jugador 2',
@@ -341,6 +341,10 @@ def session_env(mode):
         # v0.3.2: a host-side crash (0xC0000005) prints the faulting function and stack into the log (11-05: the
         # host closed with 3221225477 at the start of level 2 while the joiner froze in a video DMA job).
         'KZ_CRASH_TRACE': '1',
+        # v0.3.3 (11-07): Santi's real session (30 fps, 31 min) filled the 64 MB microVU1 cache 21 times (~6700
+        # programs each); every reset recompiled for 1-2 s on both PCs, one after the other (the 1-2 s hitches and the
+        # audio cuts). 256 MB = the most kz_vu accepts.
+        'KZ_VU_CACHE_MB': '256',
     }
     # The opening intro movie is skipped in co-op again (v0.1.5): with it, Santi's v0.1.4 session desynced at game
     # frame 60 and the joiner's picture broke (movie decoding is not deterministic between PCs). Level cutscenes play.
@@ -509,10 +513,11 @@ class Api:
         if self._proc is not None:
             return {'error': 'El juego ya está abierto.'}
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        # Keep the last 3 runs (host.log -> host.1.log -> host.2.log -> host.3.log; same for *_net.log): before 0.2.1
-        # every launch overwrote the previous log and only the last of several failed tries could be read.
+        # Keep the last 10 runs (host.log -> host.1.log -> ... -> host.10.log; same for *_net.log): before 0.2.1
+        # every launch overwrote the previous log and only the last of several failed tries could be read. v0.3.3: 3 -> 10
+        # (11-07: five tries in one evening, the first session lost its pair) and a date/time line at the top of each log.
         for stem in (tag, f'{tag}_net'):
-            for i in (3, 2, 1):
+            for i in range(10, 0, -1):
                 src = LOG_DIR / (f'{stem}.log' if i == 1 else f'{stem}.{i - 1}.log')
                 try:
                     if src.exists():
@@ -524,6 +529,8 @@ class Api:
         env.update(env_extra)
         args = [str(EXE), '--no-launcher', '--iso', game['iso']]
         log = open(LOG_DIR / f'{tag}.log', 'w', encoding='utf-8', errors='replace')
+        log.write(f'[launcher] v{VERSION} {tag} {time.strftime("%Y-%m-%d %H:%M:%S")}\n')
+        log.flush()
         flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
         try:
             self._proc = subprocess.Popen(args, cwd=str(GAME_DIR), env=env, stdout=log, stderr=subprocess.STDOUT,
@@ -549,7 +556,10 @@ class Api:
         return {'playing': True}
 
     def play(self):
-        return self._launch({}, 'solo')
+        # launcher.json "all_chapters" (default false): every chapter can be picked in the campaign menu (Continue then
+        # starts the last level, so it stays off unless asked)
+        env = {'KZ_ALL_LEVELS': '1'} if self._settings.get('all_chapters', False) else {}
+        return self._launch(env, 'solo')
 
     def coop_host(self):
         # The host's progress is the single-player memory card (disc_es\mc0, extracted with the boot files).

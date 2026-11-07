@@ -1,0 +1,13 @@
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+index 9ef9fec..d12de9f 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+@@ -3754,7 +3754,7 @@ void GSRendererHW::Draw()
+ 				return;
+ 			}
+ 		}
+-		else
++		else if (ds) // KZ1 co-op 11-07: ds is null when FRAME.FBP == ZBUF.ZBP and the lookup found nothing (host crash at level entry)
+ 		{
+ 			// If it failed to check depth test earlier, we can now check the top bits from the alpha to get a bit more accurate picture.
+ 			if (((zm && m_cached_ctx.TEST.ZTST > ZTST_ALWAYS) || (m_vt.m_eq.z && m_cached_ctx.TEST.ZTST == ZTST_GEQUAL)) && GSLocalMemory::m_psm[m_cached_ctx.ZBUF.PSM].trbpp == 32)

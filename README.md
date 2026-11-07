@@ -129,6 +129,7 @@ Same as KillzoneRecomp ([docs/README-upstream.md](docs/README-upstream.md)), plu
   branch `killzone-coop` (submodule `ext/PS2Recomp`).
 - The Spanish code set is generated from your own disc's ELF: `python tools/scripts/regen.py --es`
   (`config/killzone_es.toml` → `generated_es/`, not included).
+- PCSX2 (`ext/pcsx2`, commit `646df006a4`) needs `patches/pcsx2/*.patch` (`git apply` inside `ext/pcsx2`).
 - Build with `tools\scripts\build.bat`. The launcher (`launcher/`) is packaged with `launcher/package.sh`
   (PyInstaller + pywebview).
 

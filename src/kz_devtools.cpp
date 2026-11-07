@@ -641,6 +641,9 @@ namespace
 }
 #endif
 
+// kz_coop (11-07, KZ_STREAM_PW): arms the page watch on a guest range (read-only page, every write logged with the stack)
+void kzPageWatch(uint8_t *ram, uint32_t guest, uint32_t bytes) { pageWatchSet(ram, guest, bytes); }
+
 namespace
 {
     // KZ_LISTWATCH="vtable[,count_off,data_off]" (hex, offsets default 0x38 / 0x40): on the guest thread once per main-loop pass, watches the
